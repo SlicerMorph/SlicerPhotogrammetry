@@ -291,4 +291,9 @@ https://www.youtube.com/watch?v=YRHlb0dGyNc&t=9s
 Photogrammetry extension is supported by grants (DBI/2301405, OAC/2118240) from National Science Foundation to AMM (Seattle Children's Research Institute) 
 
 ## ACKNOWLEDGEMENT
-Photogrammety extension uses the [Segment Anything Model](https://github.com/facebookresearch/segment-anything) to segment foreground object. For stereophotogrammetic reconstuction the extension uses the [pyODM package from the Open Drone Map project](https://github.com/OpenDroneMap/PyODM).
+Photogrammety extension following open-source projects under the hood
+* [Segment Anything Model](https://github.com/facebookresearch/segment-anything) to segment foreground object.
+* [pyODM package from the Open Drone Map project](https://github.com/OpenDroneMap/PyODM): for stereophotogrammetic reconstuction of 3D models. 
+* [SAMURAI: Adapting Segment Anything Model for Zero-Shot Visual Tracking with Motion-Aware Memory](https://github.com/yangchris11/samurai?tab=readme-ov-file) for segmenting foreground object from video.
+
+We thank these groups making their tools publicly available. 
