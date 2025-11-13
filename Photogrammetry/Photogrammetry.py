@@ -828,8 +828,15 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 ):
                     raise InstallError("User cancelled.")
 
-                logging.debug('Installing PyTorch...')
-                torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu124')
+                logging.debug('Installing PyTorch via the PyTorch extension (cu126)...')
+                try:
+                    torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu126')
+                except TypeError:
+                    slicer.util.messageBox(
+                        "This PyTorchUtils build doesn't support 'cu126'. Update the extension/Slicer Nightly."
+                    )
+                    logging.warning("PyTorchUtils lacks cu126 backend.")
+                    return
                 if torch:
                     restart = slicer.util.confirmYesNoDisplay(
                         "Pytorch dependencies have been installed. A restart of 3D Slicer is needed. Restart now?"
