@@ -58,7 +58,7 @@ class VideoMasking(ScriptedLoadableModule):
 
 class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
-    DEFAULT_REPO_URL = "https://github.com/yangchris11/samurai.git"
+    DEFAULT_REPO_URL = "https://github.com/SlicerMorph/Samurai.git"
 
     SETTINGS_KEY = "VideoMasking"
     SETTINGS_INSTALLED = f"{SETTINGS_KEY}/installed"
