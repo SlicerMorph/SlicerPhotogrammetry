@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-set(MODULE_NAME SamuraiVideoMasking)
+set(MODULE_NAME VideoMasking)
 
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS

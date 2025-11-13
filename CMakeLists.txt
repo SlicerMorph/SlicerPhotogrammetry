@@ -24,7 +24,7 @@ include(${Slicer_USE_FILE})
 # Extension modules
 add_subdirectory(Photogrammetry)
 add_subdirectory(ClusterPhotos)
-add_subdirectory(SamuraiVideoMasking)
+add_subdirectory(VideoMasking)
 
 ## NEXT_MODULE
 
