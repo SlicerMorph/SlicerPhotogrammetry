@@ -249,10 +249,6 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.destPathEdit.readOnly = True
         form.addRow("Destination:", self.destPathEdit)
 
-        link = qt.QLabel(f'<a href="{self.DEFAULT_REPO_URL}">Open SAMURAI on GitHub</a>')
-        link.setOpenExternalLinks(True)
-        form.addRow("", link)
-
         row = qt.QHBoxLayout()
         self.configureBtn = qt.QPushButton("Configure SAMURAI (Blocking)")
         self.verifyBtn = qt.QPushButton("Verify Installation")
