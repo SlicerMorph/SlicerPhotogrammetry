@@ -367,21 +367,19 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         tform.addRow(self.keepInMemCheck)
 
         trow2 = qt.QHBoxLayout()
-        self.loadFramesBtn = qt.QPushButton("Load Frames From Folder")
-        self.roiBtn = qt.QPushButton("Select ROI on First Frame")
+        self.loadFramesAndROIBtn = qt.QPushButton("Load Frames & Set ROI")
+        self.loadFramesAndROIBtn.setToolTip("Load extracted frames into Slicer and display the first frame for ROI selection")
         self.finalizeROIBtn = qt.QPushButton("Finalize ROI (Save BBox)")
         self.finalizeROIBtn.setEnabled(False)
         self.trackBtn = qt.QPushButton("Run SAMURAI Masking")
         self.trackBtn.setEnabled(False)
-        trow2.addWidget(self.loadFramesBtn)
-        trow2.addWidget(self.roiBtn)
+        trow2.addWidget(self.loadFramesAndROIBtn)
         trow2.addWidget(self.finalizeROIBtn)
         trow2.addWidget(self.trackBtn)
         tform.addRow(trow2)
 
         self.ckptBrowseBtn.clicked.connect(self.onBrowseCkpt)
-        self.loadFramesBtn.clicked.connect(self.onLoadFrames)
-        self.roiBtn.clicked.connect(self.onSelectROI)
+        self.loadFramesAndROIBtn.clicked.connect(self.onLoadFramesAndSetROI)
         self.finalizeROIBtn.clicked.connect(self.onFinalizeROI)
         self.trackBtn.clicked.connect(self.onRunTracking)
 
@@ -471,7 +469,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
     def _setBusy(self, busy: bool):
         for w in (self.configureBtn, self.verifyBtn, self.openFolderBtn,
                   self.videoBrowseBtn, self.loadVideoBtn, self.urlEdit,
-                  self.ckptBrowseBtn, self.loadFramesBtn, self.roiBtn, self.finalizeROIBtn, self.trackBtn,
+                  self.ckptBrowseBtn, self.loadFramesAndROIBtn, self.finalizeROIBtn, self.trackBtn,
                   self.deviceCombo, self.keepInMemCheck):
             w.setEnabled(not busy)
         self.statusLabel.setText(f"Status: {'Working?' if busy else 'Idle'}")
@@ -1199,7 +1197,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.ckptEdit.setText(filePath)
         qt.QSettings().setValue(self.SETTINGS_CKPT_PATH, filePath)
 
-    def onLoadFrames(self):
+    def onLoadFramesAndSetROI(self):
+        """Combined function: Load frames from folder and immediately set up ROI on first frame."""
         frames_dir = self.framesDirEdit.text.strip()
         if not frames_dir:
             slicer.util.messageBox("Frames folder not set. Please run Video Prep first.")
@@ -1225,11 +1224,16 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         self._setBusy(True)
         try:
+            # Load frames
             self.framesBuffer = self._load_frames_from_folder(p)
             self._log(f"Loaded {len(self.framesBuffer)} frames from {p}")
+            
+            # Automatically set up ROI on first frame
+            self._setupROIOnFirstFrame()
+            
         except Exception as e:
-            self._log(f"Loading frames failed: {e}")
-            slicer.util.errorDisplay(f"Loading frames failed:\n{e}")
+            self._log(f"Loading frames or ROI setup failed: {e}")
+            slicer.util.errorDisplay(f"Loading frames or ROI setup failed:\n{e}")
         finally:
             self._setBusy(False)
 
@@ -1274,33 +1278,11 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         except Exception as e:
             self._log(f"WARNING: Could not refresh Red slice view: {e}")
 
-    def onSelectROI(self):
-        # First frame
-        if self.framesBuffer and len(self.framesBuffer) > 0:
-            frame0_present = True
-        else:
-            frames_dir = self.framesDirEdit.text.strip()
-            if not frames_dir:
-                slicer.util.messageBox("Frames folder not set. Please run Video Prep first.")
-                return
-            first = None
-            p0 = Path(frames_dir) / "frame_0000001.jpg"
-            if p0.exists():
-                first = str(p0)
-            else:
-                jpgs = sorted(Path(frames_dir).glob("*.jpg"))
-                if jpgs:
-                    first = str(jpgs[0])
-            if not first:
-                slicer.util.messageBox(f"No frames found in {frames_dir}")
-                return
-            import cv2
-            im = cv2.imread(first, cv2.IMREAD_COLOR)
-            if im is None:
-                slicer.util.messageBox(f"Could not read: {first}")
-                return
-            self.framesBuffer = [im]
-            frame0_present = True
+    def _setupROIOnFirstFrame(self):
+        """Internal method to set up ROI on the first frame (assumes framesBuffer is loaded)."""
+        # First frame should already be loaded in framesBuffer
+        if not self.framesBuffer or len(self.framesBuffer) == 0:
+            raise RuntimeError("No frames loaded in buffer. Cannot set up ROI.")
 
         # Display first frame
         self._show_frame_in_slice_view(self.framesBuffer[0])
