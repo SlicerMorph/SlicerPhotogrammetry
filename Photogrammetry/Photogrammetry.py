@@ -829,7 +829,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     raise InstallError("User cancelled.")
 
                 logging.debug('Installing PyTorch...')
-                torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu124')
+                torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu126')
                 if torch:
                     restart = slicer.util.confirmYesNoDisplay(
                         "Pytorch dependencies have been installed. A restart of 3D Slicer is needed. Restart now?"
