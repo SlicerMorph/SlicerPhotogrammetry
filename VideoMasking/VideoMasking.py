@@ -1006,18 +1006,68 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
     def _a100_40g_pixel_budget(self) -> int:
         """
         Return the total pixel budget (W*H*N) allowed before warning.
-        Reads an overridable value (in Gpx) from QSettings at
-          VideoMasking/pixelBudgetGpx
-        Default: 5.5 Gpx (~5_500_000_000 pixels), which comfortably allows 2160×3840×586.
+        
+        Strategy:
+        1. Query actual GPU memory if CUDA is available
+        2. Calculate dynamic budget: (GPU_RAM - model_overhead) / 4 bytes_per_pixel
+        3. Fall back to user override in QSettings at VideoMasking/pixelBudgetGpx
+        4. Final fallback: 5.5 Gpx for safety
+        
+        Assumes ~4 bytes per pixel (3 for BGR frame + 1 for mask)
+        Reserves overhead for model weights and activations:
+          - 8 GB for GPUs with >32 GB
+          - 5 GB for GPUs with 16-32 GB
+          - 3 GB for GPUs with <16 GB
         """
         s = qt.QSettings()
-        gpx_str = s.value(f"{self.SETTINGS_KEY}/pixelBudgetGpx", "5.5")
+        
+        # Check for user override first
+        gpx_str = s.value(f"{self.SETTINGS_KEY}/pixelBudgetGpx", "")
+        if gpx_str:
+            try:
+                gpx = float(gpx_str)
+                gpx = max(0.1, gpx)  # Clamp to sane minimum
+                self._log(f"Using user-configured pixel budget: {gpx:.2f} Gpx")
+                return int(gpx * 1_000_000_000)
+            except Exception:
+                pass
+        
+        # Try to query actual GPU memory dynamically
         try:
-            gpx = float(gpx_str)
-        except Exception:
-            gpx = 5.5
-        # Clamp to a sane minimum so users can't accidentally brick the guard
-        gpx = max(0.1, gpx)
+            import torch
+            if torch.cuda.is_available():
+                # Get total memory in bytes for the default GPU
+                gpu_mem_bytes = torch.cuda.get_device_properties(0).total_memory
+                gpu_mem_gb = gpu_mem_bytes / (1024 ** 3)
+                
+                # Determine overhead based on GPU size
+                if gpu_mem_gb > 32:
+                    overhead_gb = 8.0  # Large GPUs (A100-40/80, H100, etc.)
+                elif gpu_mem_gb >= 16:
+                    overhead_gb = 5.0  # Mid-range GPUs (RTX 3090, A6000, etc.)
+                else:
+                    overhead_gb = 3.0  # Smaller GPUs
+                
+                # Calculate available memory for video data
+                available_gb = max(1.0, gpu_mem_gb - overhead_gb)
+                available_bytes = available_gb * (1024 ** 3)
+                
+                # 4 bytes per pixel (3 BGR + 1 mask)
+                bytes_per_pixel = 4
+                pixel_budget = int(available_bytes / bytes_per_pixel)
+                
+                self._log(f"GPU detected: {gpu_mem_gb:.1f} GB total, "
+                         f"{overhead_gb:.1f} GB reserved for model, "
+                         f"{available_gb:.1f} GB for video data "
+                         f"→ {pixel_budget / 1e9:.2f} Gpx budget")
+                
+                return pixel_budget
+        except Exception as e:
+            self._log(f"Could not query GPU memory dynamically: {e}")
+        
+        # Fallback to conservative default
+        gpx = 5.5
+        self._log(f"Using default pixel budget (no GPU detected): {gpx:.2f} Gpx")
         return int(gpx * 1_000_000_000)
 
     def _guard_warn_if_video_too_large(self, width: int, height: int, frames: int) -> tuple[bool, str]:
