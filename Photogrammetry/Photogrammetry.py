@@ -1017,7 +1017,8 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         success = self.logic.loadSAMModel(
             variant=info["registry_key"],
             filename=info["filename"],
-            url=info["url"]
+            url=info["url"],
+            variant_display=variant
         )
         if success:
             slicer.util.infoDisplay(f"{variant} model loaded successfully.")
@@ -3108,9 +3109,11 @@ class PhotogrammetryLogic(ScriptedLoadableModuleLogic):
             self.device = torch.device("cpu")
             print("Using CPU for SAM.")
 
-    def loadSAMModel(self, variant, filename, url):
+    def loadSAMModel(self, variant, filename, url, variant_display=None):
         try:
-            sam_checkpoint = self.check_and_download_weights(filename, url)
+            if variant_display is None:
+                variant_display = variant
+            sam_checkpoint = self.check_and_download_weights(filename, url, variant_display)
             from segment_anything import sam_model_registry, SamPredictor
             self.sam = sam_model_registry[variant](checkpoint=sam_checkpoint)
             self.sam.to(self.device)
@@ -3121,14 +3124,17 @@ class PhotogrammetryLogic(ScriptedLoadableModuleLogic):
             return False
 
     @staticmethod
-    def check_and_download_weights(filename, weights_url):
+    def check_and_download_weights(filename, weights_url, variant_display):
         modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
         resourcePath = os.path.join(modulePath, 'Resources', filename)
         if not os.path.isfile(resourcePath):
-            slicer.util.infoDisplay(f"Downloading {filename}... This may take a few minutes...", autoCloseMsec=2000)
+            # Show downloading message
+            slicer.util.showStatusMessage(f"Downloading {variant_display}... This may take a few minutes...")
             try:
                 slicer.util.downloadFile(url=weights_url, targetFilePath=resourcePath)
+                slicer.util.showStatusMessage(f"{variant_display} downloaded successfully", 3000)
             except Exception as e:
+                slicer.util.showStatusMessage("")
                 slicer.util.errorDisplay(f"Failed to download {filename}: {str(e)}")
                 raise RuntimeError("Could not download SAM weights.")
         return resourcePath
