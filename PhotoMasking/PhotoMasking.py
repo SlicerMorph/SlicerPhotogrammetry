@@ -1,5 +1,5 @@
 #
-# Photogrammetry.py
+# PhotoMasking.py
 #
 # COMPLETE MODULE CODE WITH NEW TOOLTIP FEATURE FOR WEBODM PARAMETERS
 #
@@ -45,28 +45,16 @@ def convert_numpy_types(obj):
         return obj
 
 
-class Photogrammetry(ScriptedLoadableModule):
+class PhotoMasking(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        self.parent.title = "Photogrammetry"
+        self.parent.title = "PhotoMasking"
         self.parent.categories = ["SlicerMorph.Photogrammetry"]
         self.parent.dependencies = []
-        self.parent.contributors = ["Oshane Thomas (SCRI), Murat Maga (SCRI)"]
-        self.parent.helpText = """Photogrammetry is a 3D Slicer module designed to streamline the process of 
+        self.parent.contributors = ["Oshane Thomas (SCRI), A. Murat Maga (SCRI)"]
+        self.parent.helpText = """PhotoMasking is a 3D Slicer module designed to improve the process of 
         photogrammetry reconstruction. This module integrates the Segment Anything Model (SAM) for semi-automatic 
-        image masking and provides seamless connectivity to WebODM for generating high-quality 3D reconstructions 
-        from photographs. Key features include:
-
-        - **Batch and Single Image Masking**: Easily mask objects in images using bounding boxes, inclusion/exclusion 
-        points, and SAM. - **WebODM Integration**: Launch, manage, and monitor reconstruction tasks directly within 
-        the module. - **Find-GCP Support**: Generate combined Ground Control Point (GCP) lists to improve 
-        reconstruction accuracy. - **Customizable Parameters**: Fine-tune WebODM settings for optimal performance and 
-        reconstruction quality.
-
-        The module is designed to handle large datasets, offering resolution settings to optimize for GPU or 
-        CPU-based workflows. Users can save and restore tasks, making the workflow efficient for both small and 
-        large-scale projects. Whether you're a researcher, educator, or enthusiast, SlicerPhotogrammetry provides an 
-        accessible way to turn images into 3D models."""
+        image masking."""
 
         self.parent.acknowledgementText = """This module was developed with support from the National Science 
         Foundation under grants DBI/2301405 and OAC/2118240 awarded to AMM at Seattle Children's Research Institute. 
@@ -75,16 +63,16 @@ class Photogrammetry(ScriptedLoadableModule):
         # Suppress VTK warnings globally
         # vtk.vtkObject.GlobalWarningDisplayOff()
 
-        slicer.photogrammetryLO = """
+        slicer.photomaskingLO = """
         <layout type="horizontal" split="true">
-          <item>
+          <item splitSize="500">
             <view class="vtkMRMLSliceNode" singletontag="Red">
               <property name="orientation" action="default">Axial</property>
               <property name="viewlabel" action="default">R</property>
               <property name="viewcolor" action="default">#F34A33</property>
             </view>
           </item>
-          <item>
+          <item splitSize="500">
             <view class="vtkMRMLSliceNode" singletontag="Red2">
               <property name="orientation" action="default">Axial</property>
               <property name="viewlabel" action="default">R2</property>
@@ -95,7 +83,7 @@ class Photogrammetry(ScriptedLoadableModule):
         """
 
 
-class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
+class PhotoMaskingWidget(ScriptedLoadableModuleWidget):
     """
     Manages UI for:
      - SAM model loading,
@@ -116,6 +104,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
+        self.layoutId = 1003  # Custom layout ID for masking view
         self.mainTabWidget = None
         self.imageIndexLabel = None
         self.logic = None
@@ -171,78 +160,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.loadModelButton = None
         self.modelLoaded = False
 
-        # GCP
-        self.findGCPScriptSelector = None
-        self.generateGCPButton = None
-        self.gcpCoordFileSelector = None
-        self.arucoDictIDSpinBox = None
-        self.gcpListContent = ""
-        self.gcpCoordFilePath = ""
-
-        # "Clone Find-GCP" button
-        self.cloneFindGCPButton = None
-
-        # WebODM: simplified to two main buttons plus extra UI
-        self.nodeIPLineEdit = None
-        self.nodePortSpinBox = None
-        self.launchWebODMTaskButton = None
-        self.webodmLogTextEdit = None
-        self.stopMonitoringButton = None
-        self.lastWebODMOutputLineIndex = 0
-
-        # Replaces older "Check/Install/Relaunch" with new "Launch" + "Stop Node"
-        self.launchWebODMButton = None
-        self.stopWebODMButton = None
-
-        # Button to import WebODM model (OBJ) into Slicer as a 3D model
-        self.importModelButton = None
-
-        # ------------------
-        # 1) Baseline params (some remain constant, others were removed to vary)
-        # ------------------
-        self.baselineParams = {
-            "orthophoto-resolution": 0.3,
-            "skip-orthophoto": True,
-            "texturing-single-material": True,
-            "use-3dmesh": True,
-        }
-
-        # ------------------
-        # 2) Factor levels, including newly added parameters
-        # ------------------
-        self.factorLevels = {
-            "ignore-gsd": [False, True],
-            "matcher-neighbors": [16, 0, 8, 12, 24],
-            "mesh-octree-depth": [12, 13, 14],
-            "mesh-size": [300000, 500000, 750000, 1000000],
-            "min-num-features": [50000, 10000, 20000],
-            "pc-filter": [1, 2, 3, 4, 5],
-            "depthmap-resolution": [3072, 2048, 4096, 8192],
-            "matcher-type": ["bruteforce", "bow", "flann"],
-            "feature-type": ["dspsift", "akaze", "hahog", "orb", "sift"],
-            "feature-quality": ["ultra", "medium", "high"],
-            "pc-quality": ["high", "medium", "ultra"],
-            "optimize-disk-space": [True, False],
-            "rerun": ["openmvs", "dataset", "split", "merge", "opensfm"],
-            "no-gpu": [False, True],
-        }
-        self.factorComboBoxes = {}
-
-        # We'll create separate UI elements for:
-        #  - max-concurrency (QSpinBox, 16..256)
-        #  - name (QLineEdit, default "SlicerReconstruction")
-        self.maxConcurrencySpinBox = None
-        self.datasetNameLineEdit = None
-
-        self.maskedCountLabel = None
-
-        # We register a new custom layout ID
-        self.layoutId = 1003
-
-        # WebODM installation
-        self.webODMManager = None
-        self.webODMLocalFolder = None
-
         # We store references to 3 radio buttons for resolution
         self.radioFull = None
         self.radioHalf = None
@@ -265,10 +182,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # NEW: Keep track of whether we're in a special "mask all images" mode
         self.globalMaskAllInProgress = False
 
-        # NEW >> Additional references to handle Save/Restore of tasks
-        self.saveTaskButton = None
-        self.restoreTaskButton = None
-
         self.iconGreen = self.createColoredIcon(qt.QColor(0, 200, 0))
         self.iconRed = self.createColoredIcon(qt.QColor(200, 0, 0))
 
@@ -279,16 +192,12 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         - Model loading UI
         - Image set processing UI
         - Masking controls
-        - WebODM management & launching
-        - Factor combos for WebODM tasks
-        - GCP generation
-        - Import model button (new)
-        - SAVE/RESTORE task feature (new).
+        - Inclusion/Exclusion point marking for SAM
         """
 
         ScriptedLoadableModuleWidget.setup(self)
         self.load_dependencies()
-        self.logic = PhotogrammetryLogic()
+        self.logic = PhotoMaskingLogic()
 
         self.setupLogger()
         self.layout.setAlignment(qt.Qt.AlignTop)
@@ -305,13 +214,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         tab1Layout = qt.QVBoxLayout(tab1Widget)
         tab1Widget.setLayout(tab1Layout)
 
-        # Tab 2: "WebODM"
-        tab2Widget = qt.QWidget()
-        tab2Layout = qt.QVBoxLayout(tab2Widget)
-        tab2Widget.setLayout(tab2Layout)
-
         self.mainTabWidget.addTab(tab1Widget, "Image Masking")
-        self.mainTabWidget.addTab(tab2Widget, "NodeODM")
 
         #
         # (A) Main Collapsible: Import Image Sets
@@ -333,13 +236,13 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.loadModelButton.connect('clicked(bool)', self.onLoadModelClicked)
 
         self.masterFolderSelector = ctk.ctkDirectoryButton()
-        savedMasterFolder = slicer.app.settings().value("Photogrammetry/masterFolderPath", "")
+        savedMasterFolder = slicer.app.settings().value("PhotoMasking/masterFolderPath", "")
         if os.path.isdir(savedMasterFolder):
             self.masterFolderSelector.directory = savedMasterFolder
         parametersFormLayout.addRow("Input Folder:", self.masterFolderSelector)
 
         self.outputFolderSelector = ctk.ctkDirectoryButton()
-        savedOutputFolder = slicer.app.settings().value("Photogrammetry/outputFolderPath", "")
+        savedOutputFolder = slicer.app.settings().value("PhotoMasking/outputFolderPath", "")
         if os.path.isdir(savedOutputFolder):
             self.outputFolderSelector.directory = savedOutputFolder
         parametersFormLayout.addRow("Output Folder:", self.outputFolderSelector)
@@ -494,234 +397,15 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             else:
                 btn.enabled = False
 
-        #
-        # NEW >> Save/Restore Collapsible
-        #
-        saveRestoreCollapsible = ctk.ctkCollapsibleButton()
-        saveRestoreCollapsible.text = "Save/Restore Reconstruction Task"
-        tab1Layout.addWidget(saveRestoreCollapsible)
-
-        saveRestoreLayout = qt.QFormLayout(saveRestoreCollapsible)
-
-        self.saveTaskButton = qt.QPushButton("Save Task")
-        self.restoreTaskButton = qt.QPushButton("Restore Task")
-        buttonsRow = qt.QHBoxLayout()
-        buttonsRow.addWidget(self.saveTaskButton)
-        self.saveTaskButton.enabled = False
-        self.restoreTaskButton.enabled = False
-        buttonsRow.addWidget(self.restoreTaskButton)
-        saveRestoreLayout.addRow(buttonsRow)
-
-        self.saveTaskButton.connect('clicked(bool)', self.onSaveTaskClicked)
-        self.restoreTaskButton.connect('clicked(bool)', self.onRestoreTaskClicked)
-
         tab1Layout.addStretch(1)
-        # END NEW >>
-
-        #
-        # (B) Manage WebODM (Install/Launch) Collapsible
-        #
-        manageWODMCollapsibleButton = ctk.ctkCollapsibleButton()
-        manageWODMCollapsibleButton.text = "Manage WebODM (Install/Launch)"
-        tab2Layout.addWidget(manageWODMCollapsibleButton)
-        manageWODMFormLayout = qt.QFormLayout(manageWODMCollapsibleButton)
-
-        buttonRow = qt.QHBoxLayout()
-        self.launchWebODMButton = qt.QPushButton("Launch NodeODM")
-        self.stopWebODMButton = qt.QPushButton("Stop Node")
-
-        buttonRow.addWidget(self.launchWebODMButton)
-        buttonRow.addWidget(self.stopWebODMButton)
-        manageWODMFormLayout.addRow(buttonRow)
-
-        #
-        # (C) Find-GCP Collapsible
-        #
-        webODMCollapsibleButton = ctk.ctkCollapsibleButton()
-        webODMCollapsibleButton.text = "Find-GCP"
-        tab2Layout.addWidget(webODMCollapsibleButton)
-        webODMFormLayout = qt.QFormLayout(webODMCollapsibleButton)
-
-        self.cloneFindGCPButton = qt.QPushButton("Clone Find-GCP")
-        webODMFormLayout.addWidget(self.cloneFindGCPButton)
-        self.cloneFindGCPButton.connect('clicked(bool)', self.onCloneFindGCPClicked)
-
-        self.findGCPScriptSelector = ctk.ctkPathLineEdit()
-        self.findGCPScriptSelector.filters = ctk.ctkPathLineEdit().Files
-        self.findGCPScriptSelector.setToolTip("Select path to Find-GCP.py script.")
-        webODMFormLayout.addRow("Find-GCP Script:", self.findGCPScriptSelector)
-
-        savedFindGCPScript = slicer.app.settings().value("Photogrammetry/findGCPScriptPath", "")
-        if os.path.isfile(savedFindGCPScript):
-            self.findGCPScriptSelector.setCurrentPath(savedFindGCPScript)
-        self.findGCPScriptSelector.connect('currentPathChanged(QString)', self.onFindGCPScriptChanged)
-
-        self.gcpCoordFileSelector = ctk.ctkPathLineEdit()
-        self.gcpCoordFileSelector.filters = ctk.ctkPathLineEdit().Files
-        self.gcpCoordFileSelector.setToolTip("Select GCP coordinate file (required).")
-        webODMFormLayout.addRow("GCP Coord File:", self.gcpCoordFileSelector)
-
-        self.arucoDictIDSpinBox = qt.QSpinBox()
-        self.arucoDictIDSpinBox.setMinimum(0)
-        self.arucoDictIDSpinBox.setMaximum(99)
-        self.arucoDictIDSpinBox.setValue(2)
-        webODMFormLayout.addRow("ArUco Dictionary ID:", self.arucoDictIDSpinBox)
-
-        self.generateGCPButton = qt.QPushButton("Generate Single Combined GCP File (All Sets)")
-        webODMFormLayout.addWidget(self.generateGCPButton)
-        self.generateGCPButton.connect('clicked(bool)', self.onGenerateGCPClicked)
-        self.generateGCPButton.setEnabled(True)
-
-        #
-        # (D) Launch WebODM Task Collapsible
-        #
-        webodmTaskCollapsible = ctk.ctkCollapsibleButton()
-        webodmTaskCollapsible.text = "Launch WebODM Task"
-        tab2Layout.addWidget(webodmTaskCollapsible)
-        webodmTaskFormLayout = qt.QFormLayout(webodmTaskCollapsible)
-
-        self.nodeIPLineEdit = qt.QLineEdit("127.0.0.1")
-        self.nodeIPLineEdit.setToolTip("Enter the IP address of the NodeODM instance (e.g. 127.0.0.1).")
-        webodmTaskFormLayout.addRow("Node IP:", self.nodeIPLineEdit)
-
-        self.nodePortSpinBox = qt.QSpinBox()
-        self.nodePortSpinBox.setMinimum(1)
-        self.nodePortSpinBox.setMaximum(65535)
-        self.nodePortSpinBox.setValue(3002)
-        self.nodePortSpinBox.setToolTip("Port number on which NodeODM is listening. Commonly 3001 or 3002.")
-        webodmTaskFormLayout.addRow("Node Port:", self.nodePortSpinBox)
-
-        # ----------------
-        # NEW >> Tooltips for each WebODM parameter
-        # ----------------
-        parameterTooltips = {
-            "ignore-gsd": (
-                "Ignore Ground Sampling Distance (GSD). A memory/processor-hungry setting if true.\n"
-                "Ordinarily, GSD caps maximum resolution. Use with caution.\nDefault: False"
-            ),
-            "matcher-neighbors": (
-                "Perform image matching with the nearest images based on GPS exif data.\n"
-                "Set to 0 to match by triangulation.\nDefault: 0"
-            ),
-            "mesh-octree-depth": (
-                "Octree depth used in mesh reconstruction. Increase for more vertices.\n"
-                "Typical range 8-12.\nDefault: 11"
-            ),
-            "mesh-size": (
-                "Max vertex count for the output mesh.\nDefault: 200000"
-            ),
-            "min-num-features": (
-                "Minimum number of features to extract per image.\n"
-                "Higher values can help with low-overlap areas but increase processing.\nDefault: 10000"
-            ),
-            "pc-filter": (
-                "Filters the point cloud by removing outliers.\n"
-                "Value = # of standard deviations from local mean.\nDefault: 5"
-            ),
-            "depthmap-resolution": (
-                "Sets the resolution for depth maps.\n"
-                "Higher values = more detail, but more memory/time.\nTypical range 2048..8192.\nDefault: 2048"
-            ),
-            "matcher-type": (
-                "Matcher algorithm: bruteforce, bow, or flann.\n"
-                "FLANN is slower but stable, BOW is faster but might miss matches,\n"
-                "BRUTEFORCE is slow but robust.\nDefault: flann"
-            ),
-            "feature-type": (
-                "Keypoint/descriptor algorithm: akaze, dspsift, hahog, orb, sift.\n"
-                "Default: dspsift"
-            ),
-            "feature-quality": (
-                "Feature extraction quality: ultra, high, medium, low, lowest.\n"
-                "Higher quality = better features, but slower.\nDefault: high"
-            ),
-            "pc-quality": (
-                "Point cloud quality: ultra, high, medium, low, lowest.\n"
-                "Higher = denser cloud, more resources.\nDefault: medium"
-            ),
-            "optimize-disk-space": (
-                "Delete large intermediate files to reduce disk usage.\n"
-                "Prevents partial pipeline restarts.\nDefault: False"
-            ),
-            "rerun": (
-                "Rerun only a specific pipeline stage and stop.\n"
-                "Options: dataset, split, merge, opensfm, openmvs, etc.\n"
-                "Default: (none)"
-            ),
-            "no-gpu": (
-                "Disable GPU usage even if available.\nDefault: False"
-            ),
-        }
-        # ----------------
-
-        for factorName, levels in self.factorLevels.items():
-            combo = qt.QComboBox()
-            for val in levels:
-                combo.addItem(str(val))
-
-            # Assign the tooltip text for each parameter from the dictionary above:
-            if factorName in parameterTooltips:
-                combo.setToolTip(parameterTooltips[factorName])
-            else:
-                combo.setToolTip(f"Parameter '{factorName}' is not documented in the tooltips dictionary.")
-
-            self.factorComboBoxes[factorName] = combo
-            webodmTaskFormLayout.addRow(f"{factorName}:", combo)
-
-        self.maxConcurrencySpinBox = qt.QSpinBox()
-        self.maxConcurrencySpinBox.setRange(16, 256)
-        self.maxConcurrencySpinBox.setValue(16)
-        self.maxConcurrencySpinBox.setToolTip(
-            "Maximum number of processes used by WebODM.\n"
-            "Higher values = faster but more memory usage."
-        )
-        webodmTaskFormLayout.addRow("max-concurrency:", self.maxConcurrencySpinBox)
-
-        self.datasetNameLineEdit = qt.QLineEdit("SlicerReconstruction")
-        self.datasetNameLineEdit.setToolTip(
-            "Name of the dataset in WebODM.\nThis will be the reconstruction folder label."
-        )
-        webodmTaskFormLayout.addRow("name:", self.datasetNameLineEdit)
-
-        self.launchWebODMTaskButton = qt.QPushButton("Run NodeODM Task With Selected Parameters (non-blocking)")
-        webodmTaskFormLayout.addWidget(self.launchWebODMTaskButton)
-        self.launchWebODMTaskButton.setEnabled(False)
-        self.launchWebODMTaskButton.connect('clicked(bool)', self.onRunWebODMTask)
-
-        self.webodmLogTextEdit = qt.QTextEdit()
-        self.webodmLogTextEdit.setReadOnly(True)
-        webodmTaskFormLayout.addRow("Console Log:", self.webodmLogTextEdit)
-
-        self.stopMonitoringButton = qt.QPushButton("Stop Monitoring")
-        self.stopMonitoringButton.setEnabled(False)
-        webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
-
-        self.importModelButton = qt.QPushButton("Import Reconstructed Model")
-        tab2Layout.addWidget(self.importModelButton)
-
-        tab2Layout.addStretch(1)
-
-        # Connect new simplified button signals
-        self.launchWebODMButton.connect('clicked(bool)', self.onLaunchWebODMClicked)
-        self.stopWebODMButton.connect('clicked(bool)', self.onStopNodeClicked)
-        self.stopMonitoringButton.connect('clicked(bool)', self.onStopMonitoring)
-        self.importModelButton.connect('clicked(bool)', self.onImportModelClicked)
 
         self.createMasterNodes()
-
-        modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
-        self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
-
-        # Ensure the folder exists with proper permissions
-        self.ensure_webodm_folder_permissions()
-
-        self.webODMManager = SlicerWebODMManager(widget=self)
         self.initializeInclusionMarkupsNode()
         self.initializeExclusionMarkupsNode()
 
         self.addLayoutButton(self.layoutId, "Double Red Viewport",
-                             "Custom Layout for Photogrammetry Module",
-                             "red_squared_lo_icon.png", slicer.photogrammetryLO)
+                             "Custom Layout for PhotoMasking Module",
+                             "red_squared_lo_icon.png", slicer.photomaskingLO)
 
     def createColoredIcon(self, color, size=16):
         pixmap = qt.QPixmap(size, size)
@@ -786,18 +470,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Optional: auto-resize the first column for the index
         # self.imageTable.resizeColumnToContents(0)
 
-    def ensure_webodm_folder_permissions(self):
-        """
-        Create the WebODM folder if it doesn't exist and set permissions.
-        """
-        try:
-            if not os.path.exists(self.webODMLocalFolder):
-                os.makedirs(self.webODMLocalFolder)
-            os.chmod(self.webODMLocalFolder, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-            logging.info(f"WebODM folder created and permissions set: {self.webODMLocalFolder}")
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\n{str(e)}")
-
     def load_dependencies(self):
         """
         Ensure all needed Python dependencies are installed.
@@ -813,7 +485,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         try:
             import PyTorchUtils
         except ModuleNotFoundError:
-            slicer.util.messageBox("Photogrammetry requires the PyTorch extension. "
+            slicer.util.messageBox("PhotoMasking requires the PyTorch extension. "
                                    "Please install it from the Extensions Manager.")
         torchLogic = None
         try:
@@ -872,7 +544,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             from slicer.util import downloadFile, extractArchive, pip_install
 
             # 1) Decide where to put the downloaded ZIP locally:
-            modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
+            modulePath = os.path.dirname(slicer.modules.photomasking.path)
             resourcesFolder = os.path.join(modulePath, "Resources")
             if not os.path.isdir(resourcesFolder):
                 os.makedirs(resourcesFolder)
@@ -890,12 +562,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             import segment_anything
 
         try:
-            import pyodm
-        except ImportError:
-            slicer.util.pip_install("pyodm")
-            import pyodm
-
-        try:
             import matplotlib
         except ImportError:
             slicer.util.pip_install("matplotlib")
@@ -910,9 +576,9 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         """
 
         if not slicer.app.layoutManager().layoutLogic().GetLayoutNode().SetLayoutDescription(self.layoutId,
-                                                                                             slicer.photogrammetryLO):
+                                                                                             slicer.photomaskingLO):
             slicer.app.layoutManager().layoutLogic().GetLayoutNode().AddLayoutDescription(self.layoutId,
-                                                                                          slicer.photogrammetryLO)
+                                                                                          slicer.photomaskingLO)
 
         slicer.app.layoutManager().setLayout(self.layoutId)
 
@@ -988,9 +654,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
 
-    def onFindGCPScriptChanged(self, newPath):
-        slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", newPath)
-
     def updateMaskedCounter(self):
         totalImages = 0
         maskedCount = 0
@@ -1034,7 +697,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.outputFolderSelector.setEnabled(True)
             self.samVariantCombo.setEnabled(False)
             self.loadModelButton.setEnabled(False)
-            self.restoreTaskButton.setEnabled(True)
         else:
             slicer.util.errorDisplay("Failed to load the model. Check logs.")
 
@@ -1074,8 +736,8 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay("Please select a valid output folder.")
             return
 
-        slicer.app.settings().setValue("Photogrammetry/masterFolderPath", masterFolderPath)
-        slicer.app.settings().setValue("Photogrammetry/outputFolderPath", outputFolderPath)
+        slicer.app.settings().setValue("PhotoMasking/masterFolderPath", masterFolderPath)
+        slicer.app.settings().setValue("PhotoMasking/outputFolderPath", outputFolderPath)
 
         # Prepare subfolders
         subfolders = [f for f in os.listdir(masterFolderPath)
@@ -1230,7 +892,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.nextButton.enabled = (len(self.imagePaths) > 1)
 
         self.updateMaskedCounter()
-        self.updateWebODMTaskAvailability()
         self.enableMaskAllImagesIfPossible()
 
     def getEXIFBytes(self, path):
@@ -1283,7 +944,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.placeBoundingBoxButton.enabled = True
         self.refreshButtonStatesBasedOnCurrentState()
         self.updateMaskedCounter()
-        self.updateWebODMTaskAvailability()
         self.updateImageTable()
 
         if len(self.imagePaths) > 1:
@@ -1568,7 +1228,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Re-display
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
-        self.updateWebODMTaskAvailability()
         self.updateImageTable()
 
         # Restore normal button states
@@ -1806,7 +1465,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskAllProgressBar.setVisible(False)
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
-        self.updateWebODMTaskAvailability()
         self.updateImageTable()
 
         self.restoreButtonStates()
@@ -1999,7 +1657,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         stInfo["bboxCoords"] = None
 
         self.updateMaskedCounter()
-        self.updateWebODMTaskAvailability()
         self.updateImageTable()
         self.updateVolumeDisplay()
 
@@ -2196,216 +1853,6 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             combined_mask = np.logical_or(combined_mask, mask_bool)
         return combined_mask
 
-    def onGenerateGCPClicked(self):
-        import subprocess
-        find_gcp_script = self.findGCPScriptSelector.currentPath
-        if not find_gcp_script or not os.path.isfile(find_gcp_script):
-            slicer.util.errorDisplay("Please select a valid Find-GCP.py script path.")
-            return
-
-        self.gcpCoordFilePath = self.gcpCoordFileSelector.currentPath
-        if not self.gcpCoordFilePath or not os.path.isfile(self.gcpCoordFilePath):
-            slicer.util.errorDisplay("Please select a valid GCP coordinate file (required).")
-            return
-
-        outputFolder = self.outputFolderSelector.directory
-        if not outputFolder or not os.path.isdir(outputFolder):
-            slicer.util.errorDisplay("Please select a valid output folder.")
-            return
-
-        combinedOutputFile = os.path.join(outputFolder, "combined_gcp_list.txt")
-
-        masterFolderPath = self.masterFolderSelector.directory
-        if not masterFolderPath or not os.path.isdir(masterFolderPath):
-            slicer.util.errorDisplay("Please select a valid master folder.")
-            return
-
-        subfolders = [f for f in os.listdir(masterFolderPath)
-                      if os.path.isdir(os.path.join(masterFolderPath, f))]
-        allImages = []
-        for sf in subfolders:
-            subFolderPath = os.path.join(masterFolderPath, sf)
-            imgs = self.logic.get_image_paths_from_folder(subFolderPath)
-            allImages.extend(imgs)
-
-        if len(allImages) == 0:
-            slicer.util.warningDisplay("No images found in any subfolder. Nothing to do.")
-            return
-
-        dict_id = self.arucoDictIDSpinBox.value
-        cmd = [
-            sys.executable,
-            find_gcp_script,
-            "-t", "ODM",
-            "-d", str(dict_id),
-            "-i", self.gcpCoordFilePath,
-            "--epsg", "3857",
-            "-o", combinedOutputFile
-        ]
-        cmd += allImages
-
-        try:
-            slicer.util.infoDisplay("Running Find-GCP to produce a combined gcp_list.txt...")
-            subprocess.run(cmd, check=True)
-
-            if os.path.isfile(combinedOutputFile):
-                with open(combinedOutputFile, "r") as f:
-                    self.gcpListContent = f.read()
-
-                slicer.util.infoDisplay(
-                    f"Combined GCP list created successfully at:\n{combinedOutputFile}",
-                    autoCloseMsec=3500
-                )
-            else:
-                slicer.util.warningDisplay(f"Find-GCP did not produce the file:\n{combinedOutputFile}")
-
-        except subprocess.CalledProcessError as e:
-            slicer.util.warningDisplay(f"Find-GCP failed (CalledProcessError): {str(e)}")
-        except Exception as e:
-            slicer.util.warningDisplay(f"An error occurred running Find-GCP: {str(e)}")
-
-    def generateShortTaskName(self, basePrefix, paramsDict):
-        paramItems = sorted(paramsDict.items())
-        paramString = ";".join(f"{k}={v}" for k, v in paramItems)
-        md5Hash = hashlib.md5(paramString.encode('utf-8')).hexdigest()
-        shortHash = md5Hash[:8]
-        shortName = f"{basePrefix}_{shortHash}"
-        return shortName
-
-    def onRunWebODMTask(self):
-        if not self.allSetsHavePhysicalMasks():
-            slicer.util.warningDisplay("Not all images have masks. Please mask all sets first.")
-            return
-        self.webODMManager.onRunWebODMTask()
-
-    def allSetsHavePhysicalMasks(self):
-        if not self.setStates:
-            return False
-        outputRoot = self.outputFolderSelector.directory
-        if not os.path.isdir(outputRoot):
-            return False
-        for setName, setData in self.setStates.items():
-            setOutputFolder = os.path.join(outputRoot, setName)
-            if not os.path.isdir(setOutputFolder):
-                return False
-            for imagePath in setData["imagePaths"]:
-                baseName = os.path.splitext(os.path.basename(imagePath))[0]
-                maskFile = os.path.join(setOutputFolder, f"{baseName}_mask.jpg")
-                if not os.path.isfile(maskFile):
-                    return False
-        return True
-
-    def updateWebODMTaskAvailability(self):
-        allSetsMasked = self.allSetsHavePhysicalMasks()
-        self.launchWebODMTaskButton.setEnabled(allSetsMasked)
-
-    def onCloneFindGCPClicked(self):
-        import os
-        import shutil
-        import slicer
-        from slicer.util import downloadFile, extractArchive
-
-        # -- Paths we will use:
-        modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
-        resourcesFolder = os.path.join(modulePath, "Resources")
-        os.makedirs(resourcesFolder, exist_ok=True)
-
-        # 1) Where to save the downloaded .zip
-        zipFilePath = os.path.join(resourcesFolder, "Find-GCP.zip")
-        # 2) The name of the folder that GitHub's master.zip will produce
-        extractedFolderName = "Find-GCP-master"
-        # 3) Full path to that folder after extraction
-        cloneFolder = os.path.join(resourcesFolder, extractedFolderName)
-        # 4) The script we expect inside that extracted folder
-        localGCPFindScript = os.path.join(cloneFolder, "gcp_find.py")
-
-        # Direct download link for the .zip (refs/heads/master)
-        url = "https://github.com/zsiki/Find-GCP/archive/refs/heads/master.zip"
-
-        # -- Download the ZIP
-        slicer.util.infoDisplay(
-            f"Downloading Find-GCP ZIP from:\n{url}\nPlease wait...",
-            autoCloseMsec=2000
-        )
-        try:
-            # Overwrite=False by default, but you can specify overwrite=True if you prefer
-            downloadFile(url, zipFilePath)
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to download Find-GCP zip:\n{str(e)}")
-            return
-
-        # -- Check if the folder is already there
-        if os.path.isdir(cloneFolder):
-            msg = (
-                f"The '{extractedFolderName}' folder already exists in the Resources directory.\n"
-                "Would you like to delete it and extract again (overwrite)?"
-            )
-            if not slicer.util.confirmYesNoDisplay(msg):
-                # They said "No"; leave existing folder as-is
-                slicer.util.infoDisplay("Using existing folder; no changes made.")
-                if os.path.isfile(localGCPFindScript):
-                    self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
-                    slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", localGCPFindScript)
-                else:
-                    slicer.util.warningDisplay(
-                        f"Existing folder found, but {localGCPFindScript} does not exist.\n"
-                        "Please pick the correct script manually."
-                    )
-                return
-            else:
-                try:
-                    shutil.rmtree(cloneFolder)
-                except Exception as e:
-                    slicer.util.errorDisplay(
-                        f"Failed to remove existing folder:\n{cloneFolder}\nError: {str(e)}"
-                    )
-                    return
-
-        # -- Extract the ZIP into Resources/ (NOT into cloneFolder!)
-        slicer.util.infoDisplay(
-            f"Extracting the Find-GCP ZIP into:\n{resourcesFolder}\nPlease wait...",
-            autoCloseMsec=3000
-        )
-        try:
-            extractArchive(zipFilePath, resourcesFolder)
-            slicer.util.infoDisplay("Unzipped Find-GCP successfully.")
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to unzip {zipFilePath}:\n{str(e)}")
-            return
-
-        # -- Confirm the script is present
-        if not os.path.isfile(localGCPFindScript):
-            slicer.util.warningDisplay(
-                f"ZIP extracted, but {localGCPFindScript} was not found.\n"
-                "Please check the extracted contents or specify the correct script."
-            )
-            return
-
-        # -- Finally, update your module?s UI and settings
-        self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
-        slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", localGCPFindScript)
-
-    def cleanup(self):
-        self.saveCurrentSetState()
-        if self.masterVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterVolumeNode):
-            slicer.mrmlScene.RemoveNode(self.masterVolumeNode)
-        if self.masterLabelMapNode and slicer.mrmlScene.IsNodePresent(self.masterLabelMapNode):
-            slicer.mrmlScene.RemoveNode(self.masterLabelMapNode)
-        if self.masterMaskedVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterMaskedVolumeNode):
-            slicer.mrmlScene.RemoveNode(self.masterMaskedVolumeNode)
-        if self.emptyNode and slicer.mrmlScene.IsNodePresent(self.emptyNode):
-            slicer.mrmlScene.RemoveNode(self.emptyNode)
-
-        self.masterVolumeNode = None
-        self.masterLabelMapNode = None
-        self.masterMaskedVolumeNode = None
-        self.emptyNode = None
-
-        if self.logger and self.vtkLogFilter:
-            self.logger.removeFilter(self.vtkLogFilter)
-            self.vtkLogFilter = None
-            self.logger = None
-
     def initializeExclusionMarkupsNode(self):
         existingNode = slicer.mrmlScene.GetFirstNodeByName("ExclusionPoints")
         if existingNode and existingNode.IsA("vtkMRMLMarkupsFiducialNode"):
@@ -2555,550 +2002,20 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         else:
             return 1.0
 
-    # --------------------------------------------------------------------------------
-    # NEW >> LAUNCH WEBODM (Combined approach)
-    # --------------------------------------------------------------------------------
-    def onLaunchWebODMClicked(self):
-        proceed = slicer.util.confirmYesNoDisplay(
-            "This action will ensure nodeodm:gpu is installed (pull if needed), "
-            "stop any running container on port 3002, and launch a new one.\n\n"
-            "Proceed?"
-        )
-        if not proceed:
-            slicer.util.infoDisplay("Launch NodeODM canceled by user.")
-            return
-
-        try:
-            subprocess.run(["docker", "--version"], check=True, capture_output=True)
-        except Exception as e:
-            slicer.util.warningDisplay(f"Docker not found or not in PATH.\nError: {str(e)}")
-            return
-
-        try:
-            check_process = subprocess.run(
-                ["docker", "images", "-q", "opendronemap/nodeodm:gpu"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            image_id = check_process.stdout.strip()
-            if not image_id:
-                slicer.util.infoDisplay("nodeodm:gpu not found, pulling latest (this may take a while).")
-                pull_process = subprocess.run(
-                    ["docker", "pull", "opendronemap/nodeodm:gpu"],
-                    text=True
-                )
-                if pull_process.returncode != 0:
-                    slicer.util.errorDisplay("Failed to pull nodeodm:gpu image. Check logs.")
-                    return
-                else:
-                    slicer.util.infoDisplay("Successfully pulled nodeodm:gpu.")
-        except subprocess.CalledProcessError as e:
-            slicer.util.errorDisplay(f"Error checking nodeodm:gpu status: {str(e)}")
-            return
-
-        try:
-            result = subprocess.run(
-                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
-                capture_output=True, text=True, check=True
-            )
-            container_ids = result.stdout.strip().split()
-            for cid in container_ids:
-                if cid:
-                    slicer.util.infoDisplay(f"Stopping container {cid} on port 3002...")
-                    subprocess.run(["docker", "stop", cid], check=True)
-        except Exception as e:
-            slicer.util.warningDisplay(f"Error stopping old container(s): {str(e)}")
-
-        local_folder = self.webODMLocalFolder
-        if not os.path.isdir(local_folder):
-            slicer.util.infoDisplay("Creating local WebODM folder...")
-            os.makedirs(local_folder, exist_ok=True)
-
-        slicer.util.infoDisplay("Launching nodeodm:gpu container on port 3002...")
-        cmd = [
-            "docker", "run", "--rm", "-d",
-            "-p", "3002:3000",
-            "--gpus", "all",
-            "--name", "slicer-webodm-3002",
-            "-v", f"{local_folder}:/var/www/data",
-            "opendronemap/nodeodm:gpu"
-        ]
-        try:
-            subprocess.run(cmd, check=True)
-            slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
-            self.nodeIPLineEdit.setText("127.0.0.1")
-            self.nodePortSpinBox.setValue(3002)
-            slicer.app.settings().setValue("Photogrammetry/WebODMIP", "127.0.0.1")
-            slicer.app.settings().setValue("Photogrammetry/WebODMPort", "3002")
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
-
-    def onStopNodeClicked(self):
-        jobInProgress = (self.webODMManager.webodmTask is not None)
-
-        if jobInProgress:
-            proceed = slicer.util.confirmYesNoDisplay(
-                "A WebODM task appears to be in progress. Stopping the node now will cancel that task.\n\n"
-                "Do you want to continue?"
-            )
-            if not proceed:
-                slicer.util.infoDisplay("Stop Node canceled by user.")
-                return
-
-        try:
-            result = subprocess.run(
-                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
-                capture_output=True, text=True, check=True
-            )
-            container_ids = result.stdout.strip().split()
-            if not container_ids or not any(container_ids):
-                slicer.util.infoDisplay("No container currently running on port 3002.")
-                return
-
-            for cid in container_ids:
-                if cid:
-                    slicer.util.infoDisplay(f"Stopping container {cid} on port 3002...")
-                    subprocess.run(["docker", "stop", cid], check=True)
-            slicer.util.infoDisplay("Node successfully stopped.")
-        except Exception as e:
-            slicer.util.warningDisplay(f"Error stopping container(s): {str(e)}")
-
-    def onStopMonitoring(self):
-        self.webODMManager.onStopMonitoring()
-
-    def onImportModelClicked(self):
-        self.webODMManager.onImportModelClicked()
-
-    # NEW >> Save and Restore Task
-    def onSaveTaskClicked(self):
-        """
-        Save the current reconstruction setup, including:
-         - Input folder, Output folder
-         - setStates (minus exifData, to keep size small)
-         - WebODM parameters (node IP, port, factor combos, concurrency, dataset name)
-         - webODMManager.webodmOutDir (if any)
-         - Optionally whether a completed model is present
-        """
-        masterFolder = self.masterFolderSelector.directory
-        outputFolder = self.outputFolderSelector.directory
-
-        if not masterFolder or not os.path.isdir(masterFolder):
-            slicer.util.warningDisplay("Cannot save task: Master folder not valid.")
-            return
-        if not outputFolder or not os.path.isdir(outputFolder):
-            slicer.util.warningDisplay("Cannot save task: Output folder not valid.")
-            return
-
-        # Prepare setStates copy without exifData
-        setStatesCopy = {}
-        for k, v in self.setStates.items():
-            setStatesCopy[k] = {
-                "imagePaths": v["imagePaths"],
-                "imageStates": v["imageStates"],
-            }
-
-        # Gather factor combos
-        chosenFactors = {}
-        for factorName, combo in self.factorComboBoxes.items():
-            chosenFactors[factorName] = combo.currentText
-
-        # Check if there's a completed model
-        modelPath = None
-        taskCompleted = False
-        if self.webODMManager.webodmOutDir and os.path.isdir(self.webODMManager.webodmOutDir):
-            candidateObj = os.path.join(self.webODMManager.webodmOutDir, "odm_texturing", "odm_textured_model_geo.obj")
-            if os.path.isfile(candidateObj):
-                modelPath = candidateObj
-                taskCompleted = True
-
-        dataToSave = {
-            "masterFolderPath": masterFolder,
-            "outputFolderPath": outputFolder,
-            "setStates": setStatesCopy,
-            "webodmParams": {
-                "nodeIP": self.nodeIPLineEdit.text.strip(),
-                "nodePort": self.nodePortSpinBox.value,
-                "factors": chosenFactors,
-                "maxConcurrency": self.maxConcurrencySpinBox.value,
-                "datasetName": self.datasetNameLineEdit.text.strip(),
-            },
-            "webodmOutDir": self.webODMManager.webodmOutDir,
-            "taskCompleted": taskCompleted,
-            "modelPath": modelPath,
-            # For completeness, store resolution selection:
-            "maskingResolution": "full" if self.radioFull.isChecked() else (
-                "half" if self.radioHalf.isChecked() else "quarter")
-        }
-
-        dataToSave = convert_numpy_types(dataToSave)
-
-        # Let user pick a JSON file path
-        fileDialog = qt.QFileDialog()
-        fileDialog.setNameFilter("JSON Files (*.json)")
-        fileDialog.setDefaultSuffix("json")
-        fileDialog.setAcceptMode(qt.QFileDialog.AcceptSave)
-        if fileDialog.exec_() == qt.QFileDialog.Accepted:
-            selectedFile = fileDialog.selectedFiles()[0]
-            try:
-                with open(selectedFile, 'w') as f:
-                    json.dump(dataToSave, f, indent=2)
-                slicer.util.infoDisplay(f"Task saved successfully to:\n{selectedFile}")
-            except Exception as e:
-                slicer.util.errorDisplay(f"Failed to save task:\n{str(e)}")
-
-    def onRestoreTaskClicked(self):
-        """
-        Load a JSON file, restore:
-         - Master folder, Output folder
-         - setStates => re-populate UI
-         - node IP, port, factor combos, concurrency, dataset name
-         - webodmOutDir
-         - check if there's a completed model
-        """
-        fileDialog = qt.QFileDialog()
-        fileDialog.setNameFilter("JSON Files (*.json)")
-        fileDialog.setAcceptMode(qt.QFileDialog.AcceptOpen)
-        if fileDialog.exec_() != qt.QFileDialog.Accepted:
-            return
-        selectedFile = fileDialog.selectedFiles()[0]
-        if not os.path.isfile(selectedFile):
-            slicer.util.errorDisplay("Invalid file selected.")
-            return
-
-        try:
-            with open(selectedFile, 'r') as f:
-                loadedData = json.load(f)
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to load JSON:\n{str(e)}")
-            return
-
-        # Basic validation
-        requiredKeys = ["masterFolderPath", "outputFolderPath", "setStates", "webodmParams"]
-        for rk in requiredKeys:
-            if rk not in loadedData:
-                slicer.util.errorDisplay(f"JSON missing required key '{rk}'. Invalid file.")
-                return
-
-        # 1) Reset everything
-        self.clearAllData()
-
-        # 2) Set master folder, output folder
-        masterFolder = loadedData["masterFolderPath"]
-        outputFolder = loadedData["outputFolderPath"]
-        self.masterFolderSelector.directory = masterFolder
-        self.outputFolderSelector.directory = outputFolder
-
-        # 3) Re-process folders (onProcessFoldersClicked) to populate subfolders
-        #    This sets self.setStates. Then we override with the loaded setStates.
-        if os.path.isdir(masterFolder) and os.path.isdir(outputFolder):
-            self.onProcessFoldersClicked()
-
-            # Overwrite self.setStates with loaded data
-            loadedSetStates = loadedData["setStates"]
-            for setName, info in loadedSetStates.items():
-                if setName not in self.setStates:
-                    # Possibly no matching subfolder in current master folder?
-                    continue
-
-                # Convert string keys back to integer keys in "imageStates"
-                restoredImageStates = {}
-                for strKey, stateVal in info["imageStates"].items():
-                    intKey = int(strKey)
-                    restoredImageStates[intKey] = stateVal
-
-                info["imageStates"] = restoredImageStates
-                self.setStates[setName]["imageStates"] = info["imageStates"]
-                self.setStates[setName]["imagePaths"] = info["imagePaths"]
-
-            # 4) Re-check the pre-existing masks for each loaded set
-            for setName in self.setStates.keys():
-                self.currentSet = setName
-                self.imagePaths = self.setStates[setName]["imagePaths"]
-                self.imageStates = self.setStates[setName]["imageStates"]
-                self.checkPreExistingMasks()
-
-            # 5) Reset combobox to first set (or none if no sets)
-            if self.imageSetComboBox.count > 0:
-                self.imageSetComboBox.setCurrentIndex(0)
-            else:
-                self.currentSet = None
-                self.imagePaths = []
-                self.imageStates = {}
-
-            self.updateMaskedCounter()
-            self.updateWebODMTaskAvailability()
-        else:
-            slicer.util.warningDisplay("Master or output folder does not exist on disk. Partial restore done.")
-
-        # 6) Restore webodm parameters
-        wparams = loadedData.get("webodmParams", {})
-        nodeIP = wparams.get("nodeIP", "127.0.0.1")
-        nodePort = wparams.get("nodePort", 3002)
-        factors = wparams.get("factors", {})
-        maxConc = wparams.get("maxConcurrency", 16)
-        dname = wparams.get("datasetName", "SlicerReconstruction")
-
-        self.nodeIPLineEdit.setText(nodeIP)
-        self.nodePortSpinBox.setValue(nodePort)
-        self.maxConcurrencySpinBox.setValue(maxConc)
-        self.datasetNameLineEdit.setText(dname)
-
-        for factorName, selVal in factors.items():
-            if factorName in self.factorComboBoxes:
-                combo = self.factorComboBoxes[factorName]
-                idx = combo.findText(str(selVal))
-                if idx >= 0:
-                    combo.setCurrentIndex(idx)
-
-        # 7) webodmOutDir
-        self.webODMManager.webodmOutDir = loadedData.get("webodmOutDir", None)
-
-        # 8) If there's a completed model
-        taskCompleted = loadedData.get("taskCompleted", False)
-        modelPath = loadedData.get("modelPath", None)
-        if taskCompleted and modelPath and os.path.isfile(modelPath):
-            logging.info(f"Restored data suggests task completed. Model path: {modelPath}")
-        else:
-            logging.info("No completed model found in the restored data (or not found on disk).")
-
-        # 9) Restore masking resolution radio
-        res = loadedData.get("maskingResolution", "full")
-        if res == "half":
-            self.radioHalf.setChecked(True)
-        elif res == "quarter":
-            self.radioQuarter.setChecked(True)
-        else:
-            self.radioFull.setChecked(True)
-
-        slicer.util.infoDisplay("Task restored successfully from:\n" + selectedFile)
-
-
-class SlicerWebODMManager:
-    """
-    New manager class dedicated to WebODM-related functionality:
-     - Checking Docker / WebODM status
-     - Installing / Re-installing WebODM
-     - Launching a container with GPU support on port 3002
-     - Stopping a running node
-     - Creating / monitoring a pyodm Task
-     - Downloading results on completion
-     - Stopping task monitoring
-     - Importing the completed model into Slicer
-    """
-
-    def __init__(self, widget):
-        self.widget = widget
-        self.webodmTask = None
-        self.webodmOutDir = None
-        self.webodmTimer = None
-        self.lastWebODMOutputLineIndex = 0
-
-    def onRunWebODMTask(self):
-        from pyodm import Node
-
-        node_ip = self.widget.nodeIPLineEdit.text.strip()
-        node_port = self.widget.nodePortSpinBox.value
-        try:
-            node = Node(node_ip, node_port)
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to connect to Node at {node_ip}:{node_port}\n{str(e)}")
-            return
-
-        masterFolder = self.widget.masterFolderSelector.directory
-        if not masterFolder or not os.path.isdir(masterFolder):
-            slicer.util.errorDisplay("Master folder is invalid. Aborting.")
-            return
-
-        outputFolder = self.widget.outputFolderSelector.directory
-        if not outputFolder or not os.path.isdir(outputFolder):
-            slicer.util.errorDisplay("Output folder is invalid. Aborting.")
-            return
-
-        all_masked_color_jpgs = []
-        all_mask_jpgs = []
-        for root, dirs, files in os.walk(outputFolder):
-            for fn in files:
-                lower_fn = fn.lower()
-                if lower_fn.endswith(".jpg") and not lower_fn.endswith("_mask.jpg"):
-                    all_masked_color_jpgs.append(os.path.join(root, fn))
-                elif lower_fn.endswith("_mask.jpg"):
-                    all_mask_jpgs.append(os.path.join(root, fn))
-
-        all_jpgs = all_masked_color_jpgs + all_mask_jpgs
-        if len(all_jpgs) == 0:
-            slicer.util.warningDisplay("No masked .jpg images found in output folder.")
-            return
-
-        combinedGCP = os.path.join(outputFolder, "combined_gcp_list.txt")
-        files_to_upload = all_jpgs[:]
-        if os.path.isfile(combinedGCP):
-            files_to_upload.append(combinedGCP)
-        else:
-            slicer.util.infoDisplay("No combined_gcp_list.txt found. Proceeding without GCP...")
-
-        params = dict(self.widget.baselineParams)
-
-        for factorName, combo in self.widget.factorComboBoxes.items():
-            chosen_str = combo.currentText
-            if factorName == "ignore-gsd":
-                params["ignore-gsd"] = (chosen_str.lower() == "true")
-            elif factorName == "optimize-disk-space":
-                params["optimize-disk-space"] = (chosen_str.lower() == "true")
-            elif factorName == "no-gpu":
-                params["no-gpu"] = (chosen_str.lower() == "true")
-            else:
-                try:
-                    val_int = int(chosen_str)
-                    params[factorName] = val_int
-                except ValueError:
-                    params[factorName] = chosen_str
-
-        params["max-concurrency"] = self.widget.maxConcurrencySpinBox.value
-        dataset_name = self.widget.datasetNameLineEdit.text.strip()
-        if not dataset_name:
-            dataset_name = "SlicerReconstruction"
-        params["name"] = dataset_name
-
-        prefix = self.widget.datasetNameLineEdit.text.strip() or "SlicerReconstruction"
-        shortTaskName = self.widget.generateShortTaskName(prefix, params)
-
-        # shortTaskName = self.widget.generateShortTaskName("SlicerReconstruction", params)
-        slicer.util.infoDisplay("Creating WebODM Task (non-blocking). Upload may take time...")
-
-        try:
-            self.webodmTask = node.create_task(files=files_to_upload, options=params, name=shortTaskName)
-        except Exception as e:
-            slicer.util.errorDisplay(f"Task creation failed:\n{str(e)}")
-            return
-
-        slicer.util.infoDisplay(f"Task '{shortTaskName}' created successfully. Monitoring progress...")
-
-        self.webodmOutDir = os.path.join(outputFolder, f"WebODM_{shortTaskName}")
-        os.makedirs(self.webodmOutDir, exist_ok=True)
-
-        self.widget.webodmLogTextEdit.clear()
-        self.widget.stopMonitoringButton.setEnabled(True)
-
-        self.lastWebODMOutputLineIndex = 0
-
-        if self.webodmTimer:
-            self.webodmTimer.stop()
-            self.webodmTimer.deleteLater()
-
-        self.webodmTimer = qt.QTimer()
-        self.webodmTimer.setInterval(5000)
-        self.webodmTimer.timeout.connect(self.checkWebODMTaskStatus)
-        self.webodmTimer.start()
-        self.widget.saveTaskButton.enabled = True
-
-    def onStopMonitoring(self):
-        if self.webodmTimer:
-            self.webodmTimer.stop()
-            self.webodmTimer.deleteLater()
-            self.webodmTimer = None
-        self.webodmTask = None
-        self.widget.stopMonitoringButton.setEnabled(False)
-        self.widget.webodmLogTextEdit.append("Stopped monitoring.")
-
-    def checkWebODMTaskStatus(self):
-        if not self.webodmTask:
-            return
-        try:
-            info = self.webodmTask.info(with_output=self.lastWebODMOutputLineIndex)
-        except Exception as e:
-            self.widget.webodmLogTextEdit.append(f"Error retrieving task info: {str(e)}")
-            slicer.app.processEvents()
-            return
-
-        newLines = info.output or []
-        if len(newLines) > 0:
-            for line in newLines:
-                self.widget.webodmLogTextEdit.append(line)
-            self.lastWebODMOutputLineIndex += len(newLines)
-
-        self.widget.webodmLogTextEdit.append(f"Status: {info.status.name}, Progress: {info.progress}%")
-        cursor = self.widget.webodmLogTextEdit.textCursor()
-        cursor.movePosition(qt.QTextCursor.End)
-        self.widget.webodmLogTextEdit.setTextCursor(cursor)
-        self.widget.webodmLogTextEdit.ensureCursorVisible()
-        slicer.app.processEvents()
-
-        if info.status.name.lower() == "completed":
-            self.widget.webodmLogTextEdit.append(f"Task completed! Downloading results to {self.webodmOutDir} ...")
-            slicer.app.processEvents()
-            try:
-                self.webodmTask.download_assets(self.webodmOutDir)
-                slicer.util.infoDisplay(f"Results downloaded to:\n{self.webodmOutDir}")
-            except Exception as e:
-                slicer.util.warningDisplay(f"Download failed: {str(e)}")
-
-            if self.webodmTimer:
-                self.webodmTimer.stop()
-                self.webodmTimer.deleteLater()
-                self.webodmTimer = None
-            self.webodmTask = None
-            self.widget.stopMonitoringButton.setEnabled(False)
-        elif info.status.name.lower() in ["failed", "canceled"]:
-            self.widget.webodmLogTextEdit.append("Task failed or canceled. Stopping.")
-            slicer.app.processEvents()
-            if self.webodmTimer:
-                self.webodmTimer.stop()
-                self.webodmTimer.deleteLater()
-                self.webodmTimer = None
-            self.webodmTask = None
-            self.widget.stopMonitoringButton.setEnabled(False)
-
-    def onImportModelClicked(self):
-        if not self.webodmOutDir:
-            slicer.util.warningDisplay(
-                "No WebODM output directory found. Please run a WebODM reconstruction first."
-            )
-            return
-
-        objPath = os.path.join(self.webodmOutDir, "odm_texturing", "odm_textured_model_geo.obj")
-        if not os.path.isfile(objPath):
-            slicer.util.warningDisplay(
-                f"No model file found at:\n{objPath}\nMake sure the reconstruction completed successfully."
-            )
-            return
-
-        try:
-            import OBJFile  # Your unmodified module
-
-            # Create a dummy Python object to stand in for the "parent"
-            dummyParent = types.SimpleNamespace()
-
-            # Instantiate the custom OBJ reader with the dummy object
-            reader = OBJFile.OBJFileFileReader(dummyParent)
-            properties = {'fileName': objPath}
-
-            # Attempt to load the textured OBJ
-            success = reader.load(properties)
-            if success:
-                # Now, dummyParent should have loadedNodes set by OBJFileFileReader
-                if not hasattr(dummyParent, 'loadedNodes') or not dummyParent.loadedNodes:
-                    slicer.util.warningDisplay(
-                        "Reader indicated success, but 'loadedNodes' was not set on the parent."
-                    )
-                    return
-
-                nodeID = dummyParent.loadedNodes[0]
-                loadedNode = slicer.mrmlScene.GetNodeByID(nodeID)
-                if loadedNode:
-                    layoutMgr = slicer.app.layoutManager()
-                    layoutMgr.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
-                    slicer.util.infoDisplay("Imported textured OBJ and switched to 3D layout.")
-                else:
-                    slicer.util.warningDisplay("Reader indicated success but could not get the node.")
-            else:
-                slicer.util.warningDisplay("Failed to load textured model. Check logs.")
-
-        except Exception as e:
-            slicer.util.warningDisplay(f"Exception while loading textured model: {str(e)}")
-
-
-class PhotogrammetryLogic(ScriptedLoadableModuleLogic):
+    def pil_to_opencv(self, pil_image):
+        import cv2
+        import numpy as np
+        cv_image = np.array(pil_image)
+        if cv_image.ndim == 2:
+            return cv_image
+        elif cv_image.shape[2] == 4:  # RGBA -> BGR
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2BGR)
+        else:  # RGB -> BGR
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+        return cv_image
+
+
+class PhotoMaskingLogic(ScriptedLoadableModuleLogic):
     """
     Loads the SAM model, runs segmentation on color arrays.
     """
@@ -3129,7 +2046,7 @@ class PhotogrammetryLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def check_and_download_weights(filename, weights_url):
-        modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
+        modulePath = os.path.dirname(slicer.modules.photomasking.path)
         resourcePath = os.path.join(modulePath, 'Resources', filename)
         if not os.path.isfile(resourcePath):
             slicer.util.infoDisplay(f"Downloading {filename}... This may take a few minutes...", autoCloseMsec=2000)
