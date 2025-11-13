@@ -136,91 +136,96 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 pass
 
     # ---------- CUDA/NVIDIA lib path exposure ----------
-    def _prepend_path(self, var: str, path: str):
-        if not path or not os.path.isdir(path):
-            return
-        cur = os.environ.get(var, "")
-        parts = [p for p in cur.split(os.pathsep) if p]
-        if path not in parts:
-            os.environ[var] = path + (os.pathsep + cur if cur else "")
+    # NOTE: These methods are likely unnecessary. PyTorch installed via PyTorchUtils
+    # should handle CUDA library paths automatically. Neither Photogrammetry nor
+    # ClusterPhotos modules use this logic and they work fine.
+    # Kept commented out for reference in case edge cases emerge.
+    
+    # def _prepend_path(self, var: str, path: str):
+    #     if not path or not os.path.isdir(path):
+    #         return
+    #     cur = os.environ.get(var, "")
+    #     parts = [p for p in cur.split(os.pathsep) if p]
+    #     if path not in parts:
+    #         os.environ[var] = path + (os.pathsep + cur if cur else "")
 
-    def _discover_nvidia_lib_dirs(self) -> list:
-        import site
-        roots = []
-        try:
-            roots.extend(site.getsitepackages())
-        except Exception:
-            pass
-        try:
-            us = site.getusersitepackages()
-            if us:
-                roots.append(us)
-        except Exception:
-            pass
-        for p in sys.path:
-            if "site-packages" in p and p not in roots:
-                roots.append(p)
+    # def _discover_nvidia_lib_dirs(self) -> list:
+    #     import site
+    #     roots = []
+    #     try:
+    #         roots.extend(site.getsitepackages())
+    #     except Exception:
+    #         pass
+    #     try:
+    #         us = site.getusersitepackages()
+    #         if us:
+    #             roots.append(us)
+    #     except Exception:
+    #         pass
+    #     for p in sys.path:
+    #         if "site-packages" in p and p not in roots:
+    #             roots.append(p)
 
-        libdirs = set()
-        for r in roots:
-            base = Path(r) / "nvidia"
-            if not base.is_dir():
-                continue
-            for sub in base.iterdir():
-                d = sub / "lib"
-                if d.is_dir():
-                    libdirs.add(str(d))
-        try:
-            import torch  # noqa: F401
-            tlib = Path(torch.__file__).parent / "lib"
-            if tlib.is_dir():
-                libdirs.add(str(tlib))
-        except Exception:
-            pass
-        return sorted(libdirs)
+    #     libdirs = set()
+    #     for r in roots:
+    #         base = Path(r) / "nvidia"
+    #         if not base.is_dir():
+    #             continue
+    #         for sub in base.iterdir():
+    #             d = sub / "lib"
+    #             if d.is_dir():
+    #                 libdirs.add(str(d))
+    #     try:
+    #         import torch  # noqa: F401
+    #         tlib = Path(torch.__file__).parent / "lib"
+    #         if tlib.is_dir():
+    #             libdirs.add(str(tlib))
+    #     except Exception:
+    #         pass
+    #     return sorted(libdirs)
 
-    def _prepare_cuda_runtime_visibility(self, log=True):
-        """Expose CUDA *runtime wheels* and the *driver* libcuda before importing torch."""
-        if not sys.platform.startswith("linux"):
-            return
-        # 1) Wheel-provided CUDA libs (cuDNN, cuBLAS, NCCL, etc.)
-        for d in self._discover_nvidia_lib_dirs():
-            self._prepend_path("LD_LIBRARY_PATH", d)
+    # def _prepare_cuda_runtime_visibility(self, log=True):
+    #     """Expose CUDA *runtime wheels* and the *driver* libcuda before importing torch."""
+    #     if not sys.platform.startswith("linux"):
+    #         return
+    #     # 1) Wheel-provided CUDA libs (cuDNN, cuBLAS, NCCL, etc.)
+    #     for d in self._discover_nvidia_lib_dirs():
+    #         self._prepend_path("LD_LIBRARY_PATH", d)
 
-        # 2) System driver libcuda.so.1 (this is what flips torch.cuda.is_available())
-        # Try ldconfig first
-        driver_dirs = set()
-        try:
-            out = subprocess.check_output(["/sbin/ldconfig", "-p"], text=True)
-            for line in out.splitlines():
-                if "libcuda.so.1" in line:
-                    p = line.split("=>")[-1].strip()
-                    drv = os.path.dirname(p)
-                    if os.path.isdir(drv):
-                        driver_dirs.add(drv)
-        except Exception:
-            pass
-        # Fallback common locations
-        for d in ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib/wsl/lib", "/usr/local/nvidia/lib64"]:
-            if os.path.exists(os.path.join(d, "libcuda.so.1")):
-                driver_dirs.add(d)
+    #     # 2) System driver libcuda.so.1 (this is what flips torch.cuda.is_available())
+    #     # Try ldconfig first
+    #     driver_dirs = set()
+    #     try:
+    #         out = subprocess.check_output(["/sbin/ldconfig", "-p"], text=True)
+    #         for line in out.splitlines():
+    #             if "libcuda.so.1" in line:
+    #                 p = line.split("=>")[-1].strip()
+    #                 drv = os.path.dirname(p)
+    #                 if os.path.isdir(drv):
+    #                     driver_dirs.add(drv)
+    #     except Exception:
+    #         pass
+    #     # Fallback common locations
+    #     for d in ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib/wsl/lib", "/usr/local/nvidia/lib64"]:
+    #         if os.path.exists(os.path.join(d, "libcuda.so.1")):
+    #             driver_dirs.add(d)
 
-        for d in sorted(driver_dirs):
-            self._prepend_path("LD_LIBRARY_PATH", d)
+    #     for d in sorted(driver_dirs):
+    #         self._prepend_path("LD_LIBRARY_PATH", d)
 
-        os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
-        os.environ.setdefault("NCCL_LAUNCH_MODE", "GROUP")
+    #     os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
+    #     os.environ.setdefault("NCCL_LAUNCH_MODE", "GROUP")
 
-        if log:
-            self._log("CUDA runtime search paths prepared:")
-            # print only unique dirs we actually appended
-            printed = set()
-            for var in ["LD_LIBRARY_PATH"]:
-                for part in os.environ.get(var, "").split(os.pathsep):
-                    if part and part not in printed and os.path.isdir(part):
-                        printed.add(part)
-                        if any(seg in part for seg in ("nvidia", "torch/lib", "x86_64-linux-gnu", "lib64")):
-                            self._log(f"  ? {part}")
+    #     if log:
+    #         self._log("CUDA runtime search paths prepared:")
+    #         # print only unique dirs we actually appended
+    #         printed = set()
+    #         for var in ["LD_LIBRARY_PATH"]:
+    #             for part in os.environ.get(var, "").split(os.pathsep):
+    #                 if part and part not in printed and os.path.isdir(part):
+    #                     printed.add(part)
+    #                     if any(seg in part for seg in ("nvidia", "torch/lib", "x86_64-linux-gnu", "lib64")):
+    #                         self._log(f"  ? {part}")
 
     # ---------- Lifecycle ----------
     def enter(self):
@@ -455,6 +460,12 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self._setSaveControlsEnabled(browse_enabled=False, save_enabled=False)
 
         self.layout.addStretch(1)
+
+        # Refresh device list on startup to detect CUDA if PyTorch is already installed
+        try:
+            self._refreshDeviceList()
+        except Exception as e:
+            self._log(f"Could not refresh device list on startup: {e}")
 
     # ---------- Helper UI ----------
     def _setBusy(self, busy: bool):
@@ -777,7 +788,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             return f"(torch unavailable: {e})"
 
     def _refreshDeviceList(self):
-        self._prepare_cuda_runtime_visibility(log=True)  # ensure libs first
+        # self._prepare_cuda_runtime_visibility(log=True)  # ensure libs first
         try:
             import torch
             has_cuda = torch.cuda.is_available()
@@ -799,7 +810,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self._setBusy(True)
         try:
             self._log("Verifying core imports (no early torch import)?")
-            self._prepare_cuda_runtime_visibility(log=True)
+            # self._prepare_cuda_runtime_visibility(log=True)
 
             checks = [
                 ("sam2", "import sam2 as m; getattr(m, '__version__', 'OK')"),
@@ -1439,7 +1450,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             slicer.util.messageBox("Please finalize an ROI first.")
             return
 
-        self._prepare_cuda_runtime_visibility(log=False)
+        # self._prepare_cuda_runtime_visibility(log=False)
 
         device = self._comboText(self.deviceCombo).strip()
         s = qt.QSettings()
@@ -1546,7 +1557,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         return np.any(np.stack(arrs, axis=0), axis=0).astype("uint8")
 
     def _build_samurai_predictor(self, checkpoint: str, device: str):
-        self._prepare_cuda_runtime_visibility(log=False)
+        # self._prepare_cuda_runtime_visibility(log=False)
         try:
             from sam2.build_sam import build_sam2_video_predictor
         except Exception as e:
