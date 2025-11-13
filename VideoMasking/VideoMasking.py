@@ -492,15 +492,46 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
     def onOpenFolderClicked(self):
         qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(self.supportDir())))
 
-    def _run_cmd_blocking(self, args, cwd=None):
+    def _run_cmd_blocking(self, args, cwd=None, throttle_output=False):
+        """
+        Run a blocking command and log output.
+        
+        Args:
+            args: Command and arguments (list or string)
+            cwd: Working directory
+            throttle_output: If True, only log output every second (useful for noisy commands)
+        """
         if isinstance(args, str):
             args = shlex.split(args)
         p = subprocess.Popen(
             args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
         )
-        for line in p.stdout:
-            if line:
-                self._log(line.rstrip("\n"))
+        
+        if throttle_output:
+            import time
+            last_log_time = 0
+            line_buffer = []
+            
+            for line in p.stdout:
+                if line:
+                    line_buffer.append(line.rstrip("\n"))
+                    current_time = time.time()
+                    # Log at most once per second
+                    if current_time - last_log_time >= 1.0:
+                        if line_buffer:
+                            # Log only the last line from buffer
+                            self._log(line_buffer[-1])
+                            line_buffer = []
+                            last_log_time = current_time
+            
+            # Log any remaining buffered output
+            if line_buffer:
+                self._log(line_buffer[-1])
+        else:
+            for line in p.stdout:
+                if line:
+                    self._log(line.rstrip("\n"))
+        
         p.wait()
         if p.returncode != 0:
             raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(args)}")
@@ -657,21 +688,101 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             raise
 
     def _maybe_run_checkpoint_script(self, repo_dir: Path):
-        ckpt_dir = repo_dir / "checkpoints"
+        """Check and download SAM 2.1 checkpoints if needed."""
+        # Checkpoints are inside sam2 subdirectory
+        ckpt_dir = repo_dir / "sam2" / "checkpoints"
         script_sh = ckpt_dir / "download_ckpts.sh"
-        if ckpt_dir.exists() and script_sh.exists():
-            if platform.system() in ("Linux", "Darwin"):
-                self._log("Attempting checkpoint download via bash script?")
-                try:
-                    self._run_cmd_blocking(["bash", str(script_sh)], cwd=str(ckpt_dir))
-                except Exception as e:
-                    self._log(f"WARNING: Could not run checkpoint script automatically: {e}")
-                    self._log(f"Manual: cd {ckpt_dir} && bash {script_sh.name}")
-            else:
-                self._log("Windows detected. Run checkpoint script in WSL or follow repo docs.")
-                self._log(f"Manual: open folder {ckpt_dir}")
+        
+        self._log(f"Checking for checkpoints in: {ckpt_dir}")
+        
+        if not ckpt_dir.exists():
+            self._log(f"Checkpoints directory does not exist: {ckpt_dir}")
+            self._log("Place checkpoints manually if required by your model.")
+            return
+            
+        if not script_sh.exists():
+            self._log(f"Download script not found: {script_sh}")
+            self._log("Place checkpoints manually if required by your model.")
+            return
+        
+        # Check what checkpoint files already exist
+        existing_files = list(ckpt_dir.iterdir())
+        pt_files = [f for f in existing_files if f.suffix.lower() in ('.pt', '.pth')]
+        
+        self._log(f"Found {len(existing_files)} file(s) in checkpoints directory")
+        self._log(f"Found {len(pt_files)} checkpoint (.pt/.pth) file(s)")
+        
+        # If we have checkpoint files already, nothing to do
+        if pt_files:
+            self._log(f"Checkpoints already downloaded: {[f.name for f in pt_files]}")
+            # Auto-set checkpoint if not already set
+            s = qt.QSettings()
+            if not self.ckptEdit.text.strip():
+                # Prefer sam2.1_hiera_large.pt
+                large_ckpt = ckpt_dir / "sam2.1_hiera_large.pt"
+                if large_ckpt.exists():
+                    self.ckptEdit.setText(str(large_ckpt))
+                    s.setValue(self.SETTINGS_CKPT_PATH, str(large_ckpt))
+                    self._log(f"Auto-selected checkpoint: {large_ckpt.name}")
+                else:
+                    # Use first available
+                    self.ckptEdit.setText(str(pt_files[0]))
+                    s.setValue(self.SETTINGS_CKPT_PATH, str(pt_files[0]))
+                    self._log(f"Auto-selected checkpoint: {pt_files[0].name}")
+            return
+        
+        # No checkpoints exist - offer to download
+        self._log("No checkpoint files found. Prompting user to download...")
+        
+        if platform.system() in ("Linux", "Darwin"):
+            reply = slicer.util.confirmYesNoDisplay(
+                "SAM 2.1 checkpoints are not downloaded yet.\n\n"
+                "Would you like to download them now? (This will download sam2.1_hiera_large.pt)\n\n"
+                "Note: This may take several minutes depending on your connection.",
+                "Download SAM 2.1 Checkpoints"
+            )
+            
+            if not reply:
+                self._log("User declined checkpoint download.")
+                self._log(f"Manual download: cd {ckpt_dir} && bash {script_sh.name}")
+                return
+            
+            self._log("User confirmed checkpoint download. Starting download...")
+            self._log(f"Running: bash {script_sh} in directory {ckpt_dir}")
+            
+            try:
+                self._run_cmd_blocking(["bash", str(script_sh)], cwd=str(ckpt_dir), throttle_output=True)
+                self._log("Checkpoint download script completed.")
+                
+                # Verify files were actually downloaded
+                pt_files_after = [f for f in ckpt_dir.iterdir() if f.suffix.lower() in ('.pt', '.pth')]
+                if not pt_files_after:
+                    self._log("WARNING: Script completed but no .pt files found. Check logs above for errors.")
+                    return
+                
+                # Set the checkpoint to sam2.1_hiera_large.pt
+                s = qt.QSettings()
+                large_ckpt = ckpt_dir / "sam2.1_hiera_large.pt"
+                if large_ckpt.exists():
+                    self.ckptEdit.setText(str(large_ckpt))
+                    s.setValue(self.SETTINGS_CKPT_PATH, str(large_ckpt))
+                    self._log(f"Checkpoint set to: {large_ckpt.name}")
+                else:
+                    # Fall back to any .pt file found
+                    self.ckptEdit.setText(str(pt_files_after[0]))
+                    s.setValue(self.SETTINGS_CKPT_PATH, str(pt_files_after[0]))
+                    self._log(f"Checkpoint set to: {pt_files_after[0].name}")
+                    
+                self._log(f"Successfully downloaded {len(pt_files_after)} checkpoint file(s)")
+                
+            except Exception as e:
+                self._log(f"ERROR running checkpoint download script: {e}")
+                self._log(f"Manual download: cd {ckpt_dir} && bash {script_sh.name}")
+                import traceback
+                self._log(traceback.format_exc())
         else:
-            self._log("No checkpoint script found. Place checkpoints manually if required by your model.")
+            self._log("Windows detected. Automatic download not supported.")
+            self._log(f"Manual: Run in WSL or follow repo docs. Folder: {ckpt_dir}")
 
     def _ensure_torch_cu126(self) -> bool:
         try:
@@ -758,8 +869,11 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             # 3) Install Python deps + editable sam2
             self._install_python_deps(dest_dir)
 
-            # 4) Optional: run checkpoint script
+            # 4) Download checkpoints - temporarily unbusy for dialog
+            self._setBusy(False)
+            slicer.app.processEvents()  # Allow UI to update
             self._maybe_run_checkpoint_script(dest_dir)
+            self._setBusy(True)
 
             # Persist repo path
             qt.QSettings().setValue(self.SETTINGS_REPO_PATH, str(dest_dir))
@@ -1235,7 +1349,28 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
     # ---------- ROI & Tracking ----------
     def onBrowseCkpt(self):
-        startDir = os.path.dirname(self.ckptEdit.text) if self.ckptEdit.text else str(self.defaultCloneDir() / "checkpoints")
+        # Determine the default start directory
+        s = qt.QSettings()
+        repo_path = s.value(self.SETTINGS_REPO_PATH, "")
+        
+        # Try to use the configured repo path's checkpoints folder (inside sam2 subdirectory)
+        if repo_path and Path(repo_path).exists():
+            checkpoints_dir = Path(repo_path) / "sam2" / "checkpoints"
+            if checkpoints_dir.exists():
+                startDir = str(checkpoints_dir)
+            else:
+                startDir = str(Path(repo_path))
+        # Fall back to current checkpoint location if set
+        elif self.ckptEdit.text:
+            startDir = os.path.dirname(self.ckptEdit.text)
+        # Fall back to default clone location
+        else:
+            default_ckpt_dir = self.defaultCloneDir() / "sam2" / "checkpoints"
+            if default_ckpt_dir.exists():
+                startDir = str(default_ckpt_dir)
+            else:
+                startDir = str(self.defaultCloneDir())
+        
         filePath = qt.QFileDialog.getOpenFileName(
             slicer.util.mainWindow(),
             "Select SAM 2.1 checkpoint",
