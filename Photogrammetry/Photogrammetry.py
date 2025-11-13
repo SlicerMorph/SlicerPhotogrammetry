@@ -77,14 +77,14 @@ class Photogrammetry(ScriptedLoadableModule):
 
         slicer.photogrammetryLO = """
         <layout type="horizontal" split="true">
-          <item>
+          <item splitSize="500">
             <view class="vtkMRMLSliceNode" singletontag="Red">
               <property name="orientation" action="default">Axial</property>
               <property name="viewlabel" action="default">R</property>
               <property name="viewcolor" action="default">#F34A33</property>
             </view>
           </item>
-          <item>
+          <item splitSize="500">
             <view class="vtkMRMLSliceNode" singletontag="Red2">
               <property name="orientation" action="default">Axial</property>
               <property name="viewlabel" action="default">R2</property>
@@ -899,14 +899,25 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def createCustomLayout(self):
         """
         Register a new custom layout that includes side-by-side Red and Red2 slices.
-        Also make it available in the Slicer layout selector.
+        Also make it available in the Slicer layout selector with the name "Photogrammetry".
         """
 
+        # Add the layout description to the layout node
         if not slicer.app.layoutManager().layoutLogic().GetLayoutNode().SetLayoutDescription(self.layoutId,
                                                                                              slicer.photogrammetryLO):
             slicer.app.layoutManager().layoutLogic().GetLayoutNode().AddLayoutDescription(self.layoutId,
                                                                                           slicer.photogrammetryLO)
 
+        # Add a button to the layout selector with the name "Photogrammetry"
+        self.addLayoutButton(
+            layoutID=self.layoutId,
+            buttonAction="Photogrammetry",
+            toolTip="Photogrammetry layout with side-by-side image views",
+            imageFileName="Photogrammetry.png",
+            layoutDiscription=slicer.photogrammetryLO
+        )
+
+        # Set the layout to the custom layout
         slicer.app.layoutManager().setLayout(self.layoutId)
 
     def addLayoutButton(self, layoutID, buttonAction, toolTip, imageFileName, layoutDiscription):
