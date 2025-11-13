@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SamuraiVideoMasking (blocking/main-thread setup)
+VideoMasking (blocking/main-thread setup)
 ------------------------------------------------
 All work runs on the main Qt thread (no worker threads). UI may freeze during setup.
 
@@ -38,10 +38,10 @@ from slicer.ScriptedLoadableModule import (
 )
 
 
-class SamuraiVideoMasking(ScriptedLoadableModule):
+class VideoMasking(ScriptedLoadableModule):
     def __init__(self, parent):
         super().__init__(parent)
-        parent.title = "SamuraiVideoMasking"
+        parent.title = "VideoMasking"
         parent.categories = ["SlicerMorph.Photogrammetry"]
         parent.dependencies = []
         parent.contributors = ["Oshane Thomas (SCRI)"]
@@ -56,11 +56,11 @@ class SamuraiVideoMasking(ScriptedLoadableModule):
         )
 
 
-class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
+class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
     DEFAULT_REPO_URL = "https://github.com/yangchris11/samurai.git"
 
-    SETTINGS_KEY = "SamuraiVideoMasking"
+    SETTINGS_KEY = "VideoMasking"
     SETTINGS_INSTALLED = f"{SETTINGS_KEY}/installed"
     SETTINGS_REPO_PATH = f"{SETTINGS_KEY}/repoPath"
 
@@ -229,12 +229,12 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             if lm:
                 lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
         except Exception as e:
-            print(f"[SamuraiVideoMasking] WARN: could not set layout: {e}")
+            print(f"[VideoMasking] WARN: could not set layout: {e}")
 
     # ---------- UI ----------
     def setup(self):
         super().setup()
-        self.logic = SamuraiVideoMaskingLogic()
+        self.logic = VideoMaskingLogic()
 
         # === SAMURAI Setup ===
         box = ctk.ctkCollapsibleButton()
@@ -1002,7 +1002,7 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
         """
         Return the total pixel budget (W*H*N) allowed before warning.
         Reads an overridable value (in Gpx) from QSettings at
-          SamuraiVideoMasking/pixelBudgetGpx
+          VideoMasking/pixelBudgetGpx
         Default: 5.5 Gpx (~5_500_000_000 pixels), which comfortably allows 2160×3840×586.
         """
         s = qt.QSettings()
@@ -1945,7 +1945,7 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         N = len(self.framesBuffer)
         dlg = qt.QProgressDialog("Preparing masked frames?", "Cancel", 0, N, slicer.util.mainWindow())
-        dlg.setWindowTitle("SamuraiVideoMasking")
+        dlg.setWindowTitle("VideoMasking")
         dlg.setWindowModality(qt.Qt.ApplicationModal)
         dlg.setAutoReset(True)
         dlg.setAutoClose(True)
@@ -2303,7 +2303,7 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
 # -------------------------
 # Logic
 # -------------------------
-class SamuraiVideoMaskingLogic(ScriptedLoadableModuleLogic):
+class VideoMaskingLogic(ScriptedLoadableModuleLogic):
 
     def __init__(self):
         super().__init__()
