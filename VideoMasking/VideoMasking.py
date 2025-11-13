@@ -2210,16 +2210,16 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         """
         Save images according to your spec:
           - save_root_dir/
-                original/   -> original frames  (videoStem_index.jpg)
-                masked/     -> masked frames    (videoStem_index.jpg)
-                               binary masks     (videoStem_index_mask.jpg)
+                original/Set1/   -> original frames  (videoStem_index.jpg)
+                masked/Set1/     -> masked frames    (videoStem_index.jpg)
+                                    binary masks     (videoStem_index_mask.jpg)
         EXIF is embedded on every JPEG.
         """
         import cv2
         os.makedirs(save_root_dir, exist_ok=True)
-        # Choose subfolders named exactly as requested
-        original_dir = os.path.join(save_root_dir, "original")
-        masked_dir = os.path.join(save_root_dir, "masked")
+        # Choose subfolders named exactly as requested, with Set1 subfolder
+        original_dir = os.path.join(save_root_dir, "original", "Set1")
+        masked_dir = os.path.join(save_root_dir, "masked", "Set1")
         os.makedirs(original_dir, exist_ok=True)
         os.makedirs(masked_dir, exist_ok=True)
 
