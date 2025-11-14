@@ -1687,6 +1687,15 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             self.masksBuffer = mem_masks
             self._log(f"Tracking complete. {saved} masks are available in memory (no files were written).")
 
+            # Build masked frames once here (not on every filter click)
+            self._log("Preparing masked frames for keyframe filtering...")
+            try:
+                self._buildMaskedFramesBuffer()
+                self._log(f"Masked frames ready: {len(self.framesMaskedBuffer)} frames.")
+            except Exception as e:
+                self._log(f"WARNING: Could not build masked frames: {e}")
+                self.framesMaskedBuffer = None
+
             # Enable key-frame filtering and Save browse (Save button waits for folder selection)
             self._setKeyframeFilterControlsEnabled(True)
             self._setSaveControlsEnabled(browse_enabled=True, save_enabled=bool(self.saveRootDirPath))
@@ -1879,82 +1888,35 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
     def detect_keyframes(self, frames, masks, ratio=0.8):
         """
-        ORB/BFMatcher-based key-frame detection (faithful to the provided prototype),
-        with safe mask handling and UI progress updates via self.kfProgress.
-        Returns (keyframes_list, kept_indices_list).
+        ORB/BFMatcher-based key-frame detection optimized for performance.
+        Only stores indices, pre-converts masks, and reduces UI updates.
+        Returns (kept_indices_list,).
         """
         import numpy as np
         import cv2
-        try:
-            import torch  # noqa: F401
-        except Exception:
-            torch = None
-        try:
-            from tqdm import tqdm
-        except Exception:
-            # Fallback shim if tqdm isn't available
-            def tqdm(it, total=None, desc=None, leave=None):
-                return it
 
         if not frames:
-            return [], []
+            return []
 
-        def _mask(idx):
-            mask_entry = None
-            try:
-                mask_entry = masks.get(idx) if masks is not None else None
-            except Exception:
-                mask_entry = None
-
-            if mask_entry is None:
-                return np.zeros(frames[0].shape[:2], np.uint8)
-
-            def _as_numpy(tensor_like):
-                if tensor_like is None:
-                    return None
-                # torch tensor
-                if torch is not None:
-                    try:
-                        import torch as _t
-                        if isinstance(tensor_like, _t.Tensor):
-                            return tensor_like.detach().cpu().numpy()
-                    except Exception:
-                        pass
-                # dict with segmentation-like payloads
-                if isinstance(tensor_like, dict):
-                    for key in ("segmentation", "mask", "masks"):
-                        if key in tensor_like:
-                            return _as_numpy(tensor_like[key])
-                    return None
-                # list/tuple: take first convertible
-                if isinstance(tensor_like, (list, tuple)):
-                    for item in tensor_like:
-                        arr = _as_numpy(item)
-                        if arr is not None:
-                            return arr
-                    return None
-                # numpy-ish fallback
-                try:
-                    return np.asarray(tensor_like)
-                except Exception:
-                    return None
-
-            mask_np = _as_numpy(mask_entry)
-            if mask_np is None:
-                return np.zeros(frames[0].shape[:2], np.uint8)
-
-            # Match prototype?s dimensional handling
-            if mask_np.ndim == 4:
-                mask_np = mask_np[0, 0]
-            elif mask_np.ndim == 3:
-                mask_np = mask_np[0]
-
-            return (mask_np > 0.5).astype(np.uint8)
+        # Pre-convert all masks to numpy arrays once (major optimization)
+        self._log("Pre-converting masks to numpy arrays...")
+        mask_cache = {}
+        if masks:
+            for idx in range(len(frames)):
+                mask_entry = masks.get(idx)
+                if mask_entry is None:
+                    mask_cache[idx] = np.zeros(frames[0].shape[:2], np.uint8)
+                else:
+                    mask_cache[idx] = self._extract_mask_array(mask_entry, frames[0].shape[:2])
+        else:
+            # No masks - use empty masks
+            for idx in range(len(frames)):
+                mask_cache[idx] = np.zeros(frames[0].shape[:2], np.uint8)
 
         orb = cv2.ORB_create()
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, True)
-        kf, kidx = [frames[0]], [0]
-        ref_kp, ref_des = orb.detectAndCompute(frames[0], _mask(0))
+        kidx = [0]  # Only store indices, not full frames
+        ref_kp, ref_des = orb.detectAndCompute(frames[0], mask_cache[0])
 
         # Prepare UI progress
         total_iters = max(0, len(frames) - 1)
@@ -1964,31 +1926,30 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             self.kfProgress.setValue(0)
             slicer.app.processEvents()
 
-        iterable = enumerate(frames[1:], 1)
-        if len(frames) > 1:
-            iterable = tqdm(iterable, total=len(frames) - 1, desc="Key-frame thinning", leave=False)
-
         progressed = 0
-        for idx, fr in iterable:
-            kp, des = orb.detectAndCompute(fr, _mask(idx))
+        update_interval = max(1, len(frames) // 50)  # Update progress ~50 times total
+        
+        for idx in range(1, len(frames)):
+            fr = frames[idx]
+            kp, des = orb.detectAndCompute(fr, mask_cache[idx])
+            
             if not (ref_des is not None and des is not None and ref_kp):
-                kf.append(fr)
                 kidx.append(idx)
                 ref_kp, ref_des = kp, des
             else:
                 matches = bf.match(ref_des, des)
                 # identical criterion to prototype
                 if len(matches) / len(ref_kp) < ratio:
-                    kf.append(fr)
                     kidx.append(idx)
                     ref_kp, ref_des = kp, des
 
             progressed += 1
-            if self.kfProgress:
+            # Update UI much less frequently (every ~2% of frames)
+            if self.kfProgress and (progressed % update_interval == 0 or progressed == total_iters):
                 self.kfProgress.setValue(progressed)
                 slicer.app.processEvents()
 
-        return kf, kidx
+        return kidx
 
     def onFilterKeyframesClicked(self):
         # Preconditions
@@ -1998,29 +1959,24 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         if not isinstance(self.masksBuffer, dict) or len(self.masksBuffer) == 0:
             slicer.util.messageBox("Masks are not available yet. Run 'Run SAMURAI Masking' first.")
             return
+        if not self.framesMaskedBuffer or len(self.framesMaskedBuffer) == 0:
+            slicer.util.messageBox("Masked frames not prepared. Please run SAMURAI masking again.")
+            return
 
         try:
             ratio = float(self.kfSlider.value)
         except Exception:
             ratio = 0.8
 
-        # Build masked frames with progress/cancel (uses self.masksBuffer in memory)
-        try:
-            self._buildMaskedFramesBuffer()
-        except Exception as e:
-            self._log(f"Failed to build masked frames: {e}")
-            slicer.util.errorDisplay(f"Failed to build masked frames:\n{e}")
-            return
-
         self._setBusy(True)
         try:
             masked_frames = self.framesMaskedBuffer
             masks = self.masksBuffer
 
-            self._log(f"Starting key-frame filtering on MASKED frames (ratio={ratio:.2f}, N={len(masked_frames)})?")
-            kf, kidx = self.detect_keyframes(masked_frames, masks, ratio=ratio)
+            self._log(f"Starting key-frame filtering on MASKED frames (ratio={ratio:.2f}, N={len(masked_frames)})...")
+            kidx = self.detect_keyframes(masked_frames, masks, ratio=ratio)
 
-            # Store Stage-1 results (CURRENT)
+            # Store Stage-1 results - extract keyframes only once at the end
             self.keyFrameIndices = list(kidx)
             self.keyFramesMaskedBuffer = [masked_frames[i] for i in kidx]
             self.keyFramesBuffer = [self.framesBuffer[i] for i in kidx]
@@ -2035,7 +1991,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             total = len(masked_frames)
             pct = (kept / total * 100.0) if total > 0 else 0.0
             self._log(f"Key-frame filtering complete on MASKED frames: kept {kept}/{total} ({pct:.1f}%). "
-                      f"indices={self.keyFrameIndices[:12]}{'?' if kept > 12 else ''}")
+                      f"indices={self.keyFrameIndices[:12]}{'...' if kept > 12 else ''}")
 
             slicer.util.infoDisplay(
                 f"Key-frame filtering (masked) complete.\nKept {kept} of {total} frames ({pct:.1f}%).",
@@ -2044,6 +2000,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         except Exception as e:
             self._log(f"Key-frame filtering failed: {e}")
             slicer.util.errorDisplay(f"Key-frame filtering failed:\n{e}")
+            import traceback
+            self._log(traceback.format_exc())
         finally:
             if self.kfProgress:
                 try:
@@ -2107,10 +2065,9 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
     def _buildMaskedFramesBuffer(self):
         """
         Build self.framesMaskedBuffer by applying self.masksBuffer over self.framesBuffer.
-        Shows a cancellable QProgressDialog and handles UI pumping correctly.
+        Optimized: pre-converts masks, reduces UI updates, uses numpy broadcasting.
         """
         import numpy as np
-        import cv2
 
         if not isinstance(self.framesBuffer, list) or len(self.framesBuffer) == 0:
             raise RuntimeError("No frames loaded; cannot build masked frames.")
@@ -2118,12 +2075,12 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             raise RuntimeError("No per-frame masks available; run SAMURAI masking first.")
 
         N = len(self.framesBuffer)
-        dlg = qt.QProgressDialog("Preparing masked frames?", "Cancel", 0, N, slicer.util.mainWindow())
+        dlg = qt.QProgressDialog("Preparing masked frames…", "Cancel", 0, N, slicer.util.mainWindow())
         dlg.setWindowTitle("VideoMasking")
         dlg.setWindowModality(qt.Qt.ApplicationModal)
         dlg.setAutoReset(True)
         dlg.setAutoClose(True)
-        dlg.setMinimumDuration(0)  # show immediately
+        dlg.setMinimumDuration(0)
 
         cancelled = {"flag": False}
 
@@ -2132,7 +2089,20 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         dlg.canceled.connect(_on_cancel)
 
+        # Pre-extract all masks at once (faster than doing it per-frame)
+        H, W = self.framesBuffer[0].shape[:2]
+        mask_cache = {}
+        for i in range(N):
+            mask_entry = self.masksBuffer.get(i)
+            if mask_entry is not None:
+                mask_cache[i] = self._extract_mask_array(mask_entry, (H, W))
+            else:
+                mask_cache[i] = np.zeros((H, W), dtype=np.uint8)
+
+        # Apply masks to frames with reduced UI updates
         masked = []
+        update_interval = max(1, N // 100)  # Update progress ~100 times
+        
         for i, fr in enumerate(self.framesBuffer):
             if cancelled["flag"]:
                 dlg.close()
@@ -2142,17 +2112,21 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 dlg.close()
                 raise RuntimeError(f"Frame {i} is None.")
 
-            H, W = fr.shape[:2]
-            mask_bin = self._extract_mask_array(self.masksBuffer.get(i), (H, W))
-            if mask_bin is None or mask_bin.ndim != 2:
+            mask_bin = mask_cache[i]
+            
+            # Fast numpy broadcasting: apply mask in-place
+            if mask_bin is None or np.all(mask_bin == 0):
                 out = np.zeros_like(fr)
             else:
-                out = fr.copy()
-                out[mask_bin == 0] = 0
+                # Use boolean indexing - much faster than copy + zero
+                out = fr * (mask_bin[:, :, np.newaxis] > 0).astype(fr.dtype)
+            
             masked.append(out)
 
-            dlg.setValue(i + 1)
-            slicer.app.processEvents()
+            # Update UI only every ~1% of frames
+            if i % update_interval == 0 or i == N - 1:
+                dlg.setValue(i + 1)
+                slicer.app.processEvents()
 
         dlg.close()
         self.framesMaskedBuffer = masked
