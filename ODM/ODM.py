@@ -117,6 +117,9 @@ class ODMWidget(ScriptedLoadableModuleWidget):
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
         
+        # Check and install pyodm if needed
+        self._ensurePyODMInstalled()
+        
         #
         # Input Folder Selection
         #
@@ -336,8 +339,57 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         # self.saveTaskButton.connect('clicked(bool)', self.onSaveTaskClicked)
         # self.restoreTaskButton.connect('clicked(bool)', self.onRestoreTaskClicked)
         
+        # Setup WebODM local folder
+        modulePath = os.path.dirname(slicer.modules.odm.path)
+        self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
+        self.ensure_webodm_folder_permissions()
+        
         # Initialize WebODM manager
         self.webODMManager = ODMManager(widget=self)
+
+    def ensure_webodm_folder_permissions(self):
+        """Ensure the WebODM folder exists with proper permissions."""
+        import stat
+        import logging
+        
+        try:
+            if not os.path.exists(self.webODMLocalFolder):
+                os.makedirs(self.webODMLocalFolder, exist_ok=True)
+            
+            # Set permissions: 0777 (rwxrwxrwx) so Docker container can write
+            # This is necessary because NodeODM runs as a different user inside the container
+            os.chmod(self.webODMLocalFolder, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            logging.info(f"WebODM folder created and permissions set: {self.webODMLocalFolder}")
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\\n{str(e)}")
+    
+    def _ensurePyODMInstalled(self):
+        """Check if pyodm is installed, and install it if missing."""
+        try:
+            import pyodm  # noqa: F401
+            # Already installed
+            return
+        except ImportError:
+            pass
+        
+        # Ask user to install
+        if not slicer.util.confirmOkCancelDisplay(
+            "The ODM module requires the 'pyodm' Python package.\\n\\n"
+            "Install it now?",
+            "Install pyodm"
+        ):
+            slicer.util.warningDisplay(
+                "pyodm is required for this module to function.\\n"
+                "You can install it manually via:\\n"
+                "pip install pyodm"
+            )
+            return
+        
+        try:
+            slicer.util.pip_install("pyodm")
+            slicer.util.infoDisplay("pyodm installed successfully!")
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to install pyodm:\\n{e}\\n\\nPlease install manually:\\npip install pyodm")
 
     def onLaunchWebODMClicked(self):
         """Launch NodeODM container with GPU support on port 3002"""
@@ -541,38 +593,79 @@ class ODMManager:
         """
         Launch NodeODM container with GPU support on port 3002
         """
-        # Check if container is already running
+        proceed = slicer.util.confirmYesNoDisplay(
+            "This action will ensure nodeodm:gpu is installed (pull if needed), "
+            "stop any running container on port 3002, and launch a new one.\\n\\n"
+            "Proceed?"
+        )
+        if not proceed:
+            slicer.util.infoDisplay("Launch NodeODM canceled by user.")
+            return
+        
+        # Check Docker is available
+        try:
+            subprocess.run(["docker", "--version"], check=True, capture_output=True)
+        except Exception as e:
+            slicer.util.warningDisplay(f"Docker not found or not in PATH.\\nError: {str(e)}")
+            return
+        
+        # Check if image exists, pull if needed
+        try:
+            check_process = subprocess.run(
+                ["docker", "images", "-q", "opendronemap/nodeodm:gpu"],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            image_id = check_process.stdout.strip()
+            if not image_id:
+                slicer.util.infoDisplay("nodeodm:gpu not found, pulling latest (this may take a while).")
+                pull_process = subprocess.run(
+                    ["docker", "pull", "opendronemap/nodeodm:gpu"],
+                    text=True
+                )
+                if pull_process.returncode != 0:
+                    slicer.util.errorDisplay("Failed to pull nodeodm:gpu image. Check logs.")
+                    return
+                else:
+                    slicer.util.infoDisplay("Successfully pulled nodeodm:gpu.")
+        except subprocess.CalledProcessError as e:
+            slicer.util.errorDisplay(f"Error checking nodeodm:gpu status: {str(e)}")
+            return
+        
+        # Stop any existing containers on port 3002
         try:
             result = subprocess.run(
-                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.Names}}"],
+                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
                 capture_output=True, text=True, check=True
             )
-            running = result.stdout.strip()
-            if running:
-                slicer.util.infoDisplay(f"NodeODM container '{running}' is already running on port 3002.")
-                return
+            container_ids = result.stdout.strip().split()
+            for cid in container_ids:
+                if cid:
+                    slicer.util.infoDisplay(f"Stopping container {cid} on port 3002...")
+                    subprocess.run(["docker", "stop", cid], check=True)
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to check Docker status:\\n{str(e)}")
-            return
-
-        # Pull image if needed
-        slicer.util.infoDisplay("Pulling opendronemap/nodeodm:gpu image (if not present)...")
-        try:
-            subprocess.run(["docker", "pull", "opendronemap/nodeodm:gpu"], check=True)
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to pull NodeODM image:\\n{str(e)}")
-            return
-
-        # Launch container
+            slicer.util.warningDisplay(f"Error stopping old container(s): {str(e)}")
+        
+        # Ensure local folder exists
+        local_folder = self.widget.webODMLocalFolder
+        if not os.path.isdir(local_folder):
+            slicer.util.infoDisplay("Creating local WebODM folder...")
+            os.makedirs(local_folder, exist_ok=True)
+        
+        # Launch container with volume mount
+        slicer.util.infoDisplay("Launching nodeodm:gpu container on port 3002...")
         cmd = [
-            "docker", "run", "-d",
+            "docker", "run", "--rm", "-d",
             "-p", "3002:3000",
             "--gpus", "all",
+            "--name", "slicer-webodm-3002",
+            "-v", f"{local_folder}:/var/www/data",
             "opendronemap/nodeodm:gpu"
         ]
         try:
             subprocess.run(cmd, check=True)
-            slicer.util.infoDisplay("NodeODM launched successfully on port 3002.")
+            slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
             self.widget.nodeIPLineEdit.setText("127.0.0.1")
             self.widget.nodePortSpinBox.setValue(3002)
             slicer.app.settings().setValue("ODM/WebODMIP", "127.0.0.1")
@@ -679,11 +772,8 @@ class ODMManager:
                     params[factorName] = chosen_str
 
         params["max-concurrency"] = self.widget.maxConcurrencySpinBox.value
-        dataset_name = self.widget.datasetNameLineEdit.text.strip()
-        if not dataset_name:
-            dataset_name = "SlicerReconstruction"
-        params["name"] = dataset_name
-
+        
+        # Generate task name based on parameters (creates a short hash-based name)
         prefix = self.widget.datasetNameLineEdit.text.strip() or "SlicerReconstruction"
         shortTaskName = self.generateShortTaskName(prefix, params)
 
@@ -713,7 +803,10 @@ class ODMManager:
         self.webodmTimer.setInterval(5000)
         self.webodmTimer.timeout.connect(self.checkWebODMTaskStatus)
         self.webodmTimer.start()
-        self.widget.saveTaskButton.enabled = True
+        
+        # Enable save button if it exists (currently commented out in UI)
+        if hasattr(self.widget, 'saveTaskButton') and self.widget.saveTaskButton:
+            self.widget.saveTaskButton.enabled = True
     
     def generateShortTaskName(self, basePrefix, paramsDict):
         """
