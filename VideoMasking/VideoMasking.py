@@ -2709,11 +2709,14 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                     chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
                     
                     for global_idx, local_idx in frames_by_chunk[chunk_idx]:
-                        frame_path = chunk_frames_dir / f"frame_{local_idx:06d}.png"
+                        # ffmpeg numbers frames starting from 1, not 0
+                        frame_path = chunk_frames_dir / f"{local_idx + 1:06d}.jpg"
                         import cv2
                         frame = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
                         if frame is not None:
                             frame_dict[global_idx] = frame
+                        else:
+                            self._log(f"Warning: Failed to load {frame_path}")
                     
                     chunker.cleanup_chunk_frames(chunk_frames_dir)
                 
