@@ -2363,24 +2363,30 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                             chunk_masked_frames.append(frame)
                     
                     # Filter this chunk (compare against last kept frame from previous chunk)
-                    chunk_masks = {local_idx: self.masksBuffer.get(chunk_info["start_frame"] + local_idx) 
-                                   for local_idx in range(len(chunk_frames))}
-                    
                     if last_kept_frame is not None:
                         # Insert reference frame at beginning for comparison
-                        chunk_masked_frames.insert(0, last_kept_frame)
-                        chunk_kept = self.filter_similar_frames([last_kept_frame] + chunk_masked_frames, 
-                                                                chunk_masks, similarity_threshold)
-                        # Remove reference frame index (0) and adjust indices
+                        frames_with_ref = [last_kept_frame] + chunk_masked_frames
+                        # Build mask dict with reference frame's mask at index 0, chunk masks shifted to 1+
+                        ref_mask = self.masksBuffer.get(last_kept_idx)
+                        masks_with_ref = {0: ref_mask}
+                        for local_idx in range(len(chunk_frames)):
+                            global_idx = chunk_info["start_frame"] + local_idx
+                            masks_with_ref[local_idx + 1] = self.masksBuffer.get(global_idx)
+                        
+                        chunk_kept = self.filter_similar_frames(frames_with_ref, masks_with_ref, similarity_threshold)
+                        # Remove reference frame index (0) and adjust indices back to chunk-local
                         chunk_kept = [i - 1 for i in chunk_kept if i > 0]
                     else:
                         # First chunk - no reference frame
+                        chunk_masks = {local_idx: self.masksBuffer.get(chunk_info["start_frame"] + local_idx) 
+                                       for local_idx in range(len(chunk_frames))}
                         chunk_kept = self.filter_similar_frames(chunk_masked_frames, chunk_masks, similarity_threshold)
                     
                     # Convert local indices to global and track kept frames
                     for local_idx in chunk_kept:
                         global_idx = chunk_info["start_frame"] + local_idx
                         all_kept_indices.append(global_idx)
+                        # Get the actual masked frame (without reference frame offset)
                         last_kept_frame = chunk_masked_frames[local_idx]
                         last_kept_idx = global_idx
                     
@@ -2394,8 +2400,9 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 
                 # Store results without loading all frames
                 self.keyFrameIndices = all_kept_indices
-                self.keyFramesBuffer = None  # Don't load all frames
+                self.keyFramesBuffer = []  # Empty list signals lazy loading needed
                 self.keyFramesMaskedBuffer = None
+                self._chunked_filtering_done = True  # Flag for save to load frames on-demand
                 
                 # Store only kept masks
                 kept_masks = {new_i: self.masksBuffer.get(orig_i) for new_i, orig_i in enumerate(all_kept_indices)}
@@ -2677,11 +2684,56 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             return
 
         # Pick source frames + indices
-        if isinstance(self.keyFrameIndices, list) and self.keyFrameIndices and isinstance(self.keyFramesBuffer,
-                                                                                          list) and self.keyFramesBuffer:
-            frames_to_save = list(self.keyFramesBuffer)
-            indices = list(self.keyFrameIndices)
-            self._log(f"Saving key-frame selection: {len(frames_to_save)} frames.")
+        if isinstance(self.keyFrameIndices, list) and self.keyFrameIndices and isinstance(self.keyFramesBuffer, list):
+            # Check if we need to load filtered frames on-demand (chunked video filtering)
+            if not self.keyFramesBuffer and getattr(self, '_chunked_filtering_done', False) and self._chunk_metadata:
+                # Load only the filtered frames from chunks (batch by chunk to avoid re-extraction)
+                self._log(f"Loading {len(self.keyFrameIndices)} filtered frames from chunks...")
+                frames_dir = Path(self.framesDirEdit.text.strip())
+                chunker = VideoChunker(None, frames_dir, logger=self._log)
+                
+                # Group frame indices by chunk
+                from collections import defaultdict
+                frames_by_chunk = defaultdict(list)
+                for global_idx in self.keyFrameIndices:
+                    for chunk_idx, chunk_info in enumerate(self._chunk_metadata):
+                        if chunk_info["start_frame"] <= global_idx < chunk_info["start_frame"] + chunk_info["num_frames"]:
+                            local_idx = global_idx - chunk_info["start_frame"]
+                            frames_by_chunk[chunk_idx].append((global_idx, local_idx))
+                            break
+                
+                # Load frames chunk-by-chunk
+                frame_dict = {}
+                for chunk_idx in sorted(frames_by_chunk.keys()):
+                    chunk_info = self._chunk_metadata[chunk_idx]
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    
+                    for global_idx, local_idx in frames_by_chunk[chunk_idx]:
+                        frame_path = chunk_frames_dir / f"frame_{local_idx:06d}.png"
+                        import cv2
+                        frame = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            frame_dict[global_idx] = frame
+                    
+                    chunker.cleanup_chunk_frames(chunk_frames_dir)
+                
+                # Build frames list in correct order (filter out any that failed to load)
+                loaded_indices = [idx for idx in self.keyFrameIndices if idx in frame_dict]
+                self.keyFramesBuffer = [frame_dict[idx] for idx in loaded_indices]
+                self._loaded_frame_indices = loaded_indices  # Store for save to use
+                
+                if len(loaded_indices) < len(self.keyFrameIndices):
+                    self._log(f"Warning: {len(self.keyFrameIndices) - len(loaded_indices)} frames failed to load")
+                self._log(f"Loaded {len(self.keyFramesBuffer)} filtered frames.")
+            
+            if self.keyFramesBuffer:  # Now check if we have frames
+                frames_to_save = list(self.keyFramesBuffer)
+                # Use loaded indices if available (chunked filtering), otherwise use full list
+                indices = getattr(self, '_loaded_frame_indices', self.keyFrameIndices)
+                self._log(f"Saving key-frame selection: {len(frames_to_save)} frames.")
+            else:
+                slicer.util.messageBox("No filtered frames available.")
+                return
         else:
             # Need to load all frames if not already loaded (e.g., when masks loaded from cache)
             if not isinstance(self.framesBuffer, list) or len(self.framesBuffer) <= 1:
