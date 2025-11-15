@@ -1,5 +1,5 @@
 # SlicerMorph Photogrammetry
-<img src="Photogrammetry/Resources/Icons/Photogrammetry.png" width="300">
+<img src="https://github.com/SlicerMorph/SlicerPhotogrammetry/blob/PhotoMasking-full-history/PhotoMasking/Resources/Icons/PhotoMasking.png" width="300">
 
 ## Citing Photogrammetry
 If you end up using the Photogrammetry extension in context of a scientific product (conference abstract, preprint, journal paper etc), please cite **[Thomas OO, Zhang C, Maga AM. 2025. SlicerMorph photogrammetry: an open-source photogrammetry workflow for reconstructing 3D models. Biol Open; 14 (8): bio062126. doi: https://doi.org/10.1242/bio.062126](https://journals.biologists.com/bio/article/doi/10.1242/bio.062126/368790/SlicerMorph-photogrammetry-An-open-source)**.  
