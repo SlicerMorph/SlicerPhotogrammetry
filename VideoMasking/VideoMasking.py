@@ -6,9 +6,9 @@ All work runs on the main Qt thread (no worker threads). UI may freeze during se
 
 Features
 - Collapsible "SAMURAI Setup"
-- Collapsible "Video Prep" (MOV?MP4 + frame extraction)
+- Collapsible "Video Prep" (MOV→MP4 + frame extraction)
 - Collapsible "ROI & Tracking" (checkpoint/device, Load Frames, Select ROI on First Frame,
-  Finalize ROI (Save BBox), Run SAMURAI Masking)
+  Finalize ROI & Run Tracking)
 - On module entry, set layout to One Up Red Slice (single viewer).
 
 GPU setup policy (aligns with Photogrammetry approach, using cu126 per request):
@@ -36,6 +36,27 @@ from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModuleWidget,
     ScriptedLoadableModuleLogic,
 )
+
+# Import chunking support library
+# Use __file__ instead of slicer.modules (which may not be ready yet)
+VideoChunker = None
+try:
+    module_file = Path(__file__)
+    support_dir = module_file.parent / "Support"
+    if support_dir.exists() and str(support_dir) not in sys.path:
+        sys.path.insert(0, str(support_dir))
+    
+    # Force reload VideoChunker module on each VideoMasking reload
+    import importlib
+    if 'VideoChunker' in sys.modules:
+        import VideoChunker as vc_module
+        importlib.reload(vc_module)
+        VideoChunker = vc_module.VideoChunker
+    else:
+        from VideoChunker import VideoChunker
+except Exception as e:
+    print(f"WARNING: Could not import VideoChunker: {e}")
+    VideoChunker = None
 
 
 class VideoMasking(ScriptedLoadableModule):
@@ -80,6 +101,10 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.masksBuffer = None
         self.bbox_xywh = None
 
+        # Chunking support
+        self._chunk_metadata = None  # List of chunk info dicts (if video is chunked)
+        self._pending_frame_files = None  # Frame files to load after ROI setup
+
         # Nodes / viewer
         self._firstFrameVectorNode = None
         self._roiNode = None
@@ -87,7 +112,6 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         # UI handles
         self.finalizeROIBtn = None
-        self.trackBtn = None
 
         # Early log buffering before logEdit exists
         self._earlyLogs = []
@@ -362,57 +386,43 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 pass
         tform.addRow("Device:", self.deviceCombo)
 
-        self.keepInMemCheck = qt.QCheckBox("Keep frames in memory (faster post-processing; uses RAM)")
-        self.keepInMemCheck.setChecked(True)
-        tform.addRow(self.keepInMemCheck)
-
-        trow2 = qt.QHBoxLayout()
-        self.loadFramesAndROIBtn = qt.QPushButton("Load Frames & Set ROI")
-        self.loadFramesAndROIBtn.setToolTip("Load extracted frames into Slicer and display the first frame for ROI selection")
-        self.finalizeROIBtn = qt.QPushButton("Finalize ROI (Save BBox)")
-        self.finalizeROIBtn.setEnabled(False)
-        self.trackBtn = qt.QPushButton("Run SAMURAI Masking")
-        self.trackBtn.setEnabled(False)
         trow2.addWidget(self.loadFramesAndROIBtn)
         trow2.addWidget(self.finalizeROIBtn)
-        trow2.addWidget(self.trackBtn)
         tform.addRow(trow2)
 
         self.ckptBrowseBtn.clicked.connect(self.onBrowseCkpt)
         self.loadFramesAndROIBtn.clicked.connect(self.onLoadFramesAndSetROI)
         self.finalizeROIBtn.clicked.connect(self.onFinalizeROI)
-        self.trackBtn.clicked.connect(self.onRunTracking)
 
         if s.contains(self.SETTINGS_BBOX):
             try:
                 x, y, w_, h_ = [int(v) for v in str(s.value(self.SETTINGS_BBOX)).split(",")]
                 self.bbox_xywh = (x, y, w_, h_)
                 self._log(f"Restored ROI bbox (x,y,w,h) = {self.bbox_xywh}")
-                self.trackBtn.setEnabled(True)
             except Exception:
                 pass
 
-        # === Key-frame Filtering (Stage 1) ===
+        # === Frame Similarity Filtering ===
         kbox = ctk.ctkCollapsibleButton()
-        kbox.text = "Key-frame Filtering"
+        kbox.text = "Frame Similarity Filtering"
         self.layout.addWidget(kbox)
         kform = qt.QFormLayout(kbox)
 
         krow1 = qt.QHBoxLayout()
         self.kfSlider = ctk.ctkDoubleSlider()
         self.kfSlider.orientation = qt.Qt.Horizontal
-        self.kfSlider.minimum = 0.10
-        self.kfSlider.maximum = 1.00
-        self.kfSlider.singleStep = 0.05
-        self.kfSlider.pageStep = 0.10
+        self.kfSlider.minimum = 0.60
+        self.kfSlider.maximum = 0.95
+        self.kfSlider.singleStep = 0.01
+        self.kfSlider.pageStep = 0.05
         self.kfSlider.value = 0.80
         self.kfRatioLabel = qt.QLabel("0.80")
         krow1.addWidget(self.kfSlider, 1)
         krow1.addWidget(self.kfRatioLabel)
-        kform.addRow("Match ratio (keep new key-frame if smaller):", krow1)
+        kform.addRow("Similarity threshold (remove if higher):", krow1)
 
-        self.kfRunBtn = qt.QPushButton("Filter Keyframes")
-        self.kfRunBtn.setToolTip("Run ORB/BFMatcher-based thinning over loaded frames.")
+        self.kfRunBtn = qt.QPushButton("Filter Similar Frames")
+        self.kfRunBtn.setToolTip("Remove frames with >threshold similarity in masked region. 0.80 = keep frames with <80% overlap for photogrammetry.")
         kform.addRow(self.kfRunBtn)
 
         self.kfProgress = qt.QProgressBar()
@@ -469,8 +479,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
     def _setBusy(self, busy: bool):
         for w in (self.configureBtn, self.verifyBtn, self.openFolderBtn,
                   self.videoBrowseBtn, self.loadVideoBtn, self.urlEdit,
-                  self.ckptBrowseBtn, self.loadFramesAndROIBtn, self.finalizeROIBtn, self.trackBtn,
-                  self.deviceCombo, self.keepInMemCheck):
+                  self.ckptBrowseBtn, self.loadFramesAndROIBtn, self.finalizeROIBtn,
+                  self.deviceCombo):
             w.setEnabled(not busy)
         self.statusLabel.setText(f"Status: {'Working?' if busy else 'Idle'}")
         self.statusLabel.setStyleSheet("color: #f5c542;" if busy else "color: #BBB;")
@@ -1008,10 +1018,11 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
     def onLoadVideo(self):
         """
-        Load video workflow with A100-40G size guard:
-          - Probe video (W, H, FPS, N frames) with OpenCV (fast, no decode)
-          - If total pixels exceeds a conservative A100 40GB budget, warn and abort
-          - Otherwise proceed with convert-if-MOV and frame extraction (unchanged)
+        Load video workflow with chunking support:
+          - Validate frame count (≤2000 frames)
+          - Convert MOV→MP4 if needed
+          - If video >600 frames: Split into chunks, extract only first frame for ROI
+          - If video ≤600 frames: Extract all frames (no chunking)
         """
         src = self.videoPathEdit.text.strip()
         if not src:
@@ -1021,26 +1032,6 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         if not p.exists():
             slicer.util.messageBox(f"Video not found:\n{src}")
             return
-
-        # ---- NEW: fast video size probe + guard for A100 40GB ----
-        try:
-            m = self._probe_video_metrics(str(p))
-            if m and m.get("width") and m.get("height") and m.get("frames"):
-                too_big, msg = self._guard_warn_if_video_too_large(
-                    width=int(m["width"]),
-                    height=int(m["height"]),
-                    frames=int(m["frames"])
-                )
-                if too_big:
-                    # Hard-stop by default (user can split and retry)
-                    slicer.util.messageBox(msg)
-                    self._log("Aborting load due to A100-40G size guard (video too large).")
-                    return
-            else:
-                # If we cannot probe, proceed (we'll still work; just no early guard)
-                self._log("WARNING: Could not probe video size; skipping GPU budget guard.")
-        except Exception as e:
-            self._log(f"WARNING: Video metrics probe failed: {e}. Continuing without guard.")
 
         target_mp4 = Path(self.mp4PathEdit.text.strip() or (str(p.with_suffix(".mp4"))))
         frames_dir = Path(self.framesDirEdit.text.strip() or (str(p.parent / p.stem)))
@@ -1053,9 +1044,9 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         self._setBusy(True)
         try:
-            # 1) Convert MOV?MP4 if needed
+            # 1) Convert MOV→MP4 if needed
             if p.suffix.lower() == ".mov":
-                self._log(f"Converting MOV ? MP4:\n{p}  ?  {target_mp4}")
+                self._log(f"Converting MOV → MP4:\n{p}  →  {target_mp4}")
                 self._mov_to_mp4_blocking(str(p), str(target_mp4))
                 self._log("Conversion complete.")
             else:
@@ -1079,10 +1070,34 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             frames_dir.mkdir(parents=True, exist_ok=True)
             self.framesDirEdit.setText(str(frames_dir))
 
-            # 3) Extract frames (JPEG)
-            self._log(f"Extracting frames ? {frames_dir}")
-            n = self._extract_frames_blocking(str(target_mp4), str(frames_dir))
-            self._log(f"Done. Extracted {n} frames.")
+            # 3) Initialize VideoChunker and validate frame count
+            if VideoChunker is None:
+                raise RuntimeError("VideoChunker support library not available")
+            
+            chunker = VideoChunker(str(target_mp4), str(frames_dir), logger=self._log)
+            
+            # Validate total frame count
+            is_valid, msg = chunker.validate_frame_count()
+            if not is_valid:
+                slicer.util.messageBox(msg)
+                self._log(f"Video validation failed: {msg}")
+                return
+            
+            self._log(msg)  # Log success message
+            
+            # 4) Chunking decision based on video length
+            if chunker.needs_chunking():
+                # Split into chunks and extract only first frame
+                self._log("Video requires chunking for memory safety...")
+                self._chunk_metadata = chunker.create_chunks()
+                chunker.extract_first_frame_only(self._chunk_metadata)
+                self._log(f"Chunking complete. Ready for ROI setup.")
+            else:
+                # Single chunk - extract all frames (existing behavior)
+                self._chunk_metadata = None
+                self._log(f"Extracting frames → {frames_dir}")
+                n = self._extract_frames_blocking(str(target_mp4), str(frames_dir))
+                self._log(f"Done. Extracted {n} frames (no chunking needed).")
 
             # Save last paths
             s = qt.QSettings()
@@ -1409,16 +1424,128 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         self._setBusy(True)
         try:
-            # Load frames
-            self.framesBuffer = self._load_frames_from_folder(p)
-            self._log(f"Loaded {len(self.framesBuffer)} frames from {p}")
+            import cv2
             
-            # Automatically set up ROI on first frame
+            # Auto-detect if video was chunked by checking for chunks directory
+            chunks_dir = p / "chunks"
+            first_frame_dir = p / "first_frame_only"
+            
+            if chunks_dir.exists() and first_frame_dir.exists():
+                # Chunked video - restore chunk metadata from filesystem
+                self._log("Detected chunked video - restoring chunk metadata...")
+                
+                if VideoChunker is None:
+                    raise RuntimeError("VideoChunker not available for chunked video")
+                
+                # Rebuild chunk metadata from filesystem
+                chunk_files = sorted(chunks_dir.glob("chunk_*.mp4"))
+                if not chunk_files:
+                    raise RuntimeError(f"Chunks directory exists but no chunk files found in {chunks_dir}")
+                
+                chunker = VideoChunker(None, p, logger=self._log)
+                self._chunk_metadata = []
+                current_frame = 0
+                
+                for chunk_path in chunk_files:
+                    chunk_metrics = chunker.probe_video_metrics(str(chunk_path))
+                    chunk_frames = chunk_metrics.get("frames", 0)
+                    if chunk_frames == 0:
+                        self._log(f"WARNING: Could not probe {chunk_path.name}, skipping")
+                        continue
+                    
+                    self._chunk_metadata.append({
+                        "video_path": str(chunk_path),
+                        "start_frame": current_frame,
+                        "end_frame": current_frame + chunk_frames - 1,
+                        "num_frames": chunk_frames
+                    })
+                    current_frame += chunk_frames
+                
+                self._log(f"Restored {len(self._chunk_metadata)} chunks ({current_frame} total frames)")
+                
+                # Check for cached masks
+                masks_dir = p / "cached_masks"
+                if masks_dir.exists() and self._try_load_cached_masks(masks_dir, current_frame):
+                    self._log(f"Loaded {len(self.masksBuffer)} cached masks from disk")
+                    # Enable filtering immediately
+                    self._setKeyframeFilterControlsEnabled(True)
+                    
+                    # Set default save location to frames directory if not already set
+                    if not self.saveRootDirPath:
+                        self.saveRootDirPath = str(p)
+                        self.saveRootDirButton.directory = str(p)
+                    
+                    self._setSaveControlsEnabled(browse_enabled=True, save_enabled=bool(self.saveRootDirPath))
+                    if self.saveRootDirPath:
+                        self.saveStatusLabel.setText(f"Ready to save to: {self.saveRootDirPath}")
+                    else:
+                        self.saveStatusLabel.setText("Select a save folder…")
+                else:
+                    self._log("No cached masks found - tracking will be required")
+                
+                # Load first frame from first_frame_only directory
+                files = sorted(
+                    [f for f in first_frame_dir.iterdir() if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png")],
+                    key=lambda fp: int("".join([c for c in fp.stem if c.isdigit()]) or 0)
+                )
+                if not files:
+                    raise RuntimeError(f"No images found in {first_frame_dir}")
+                
+                first_frame = cv2.imread(str(files[0]), cv2.IMREAD_COLOR)
+                if first_frame is None:
+                    raise RuntimeError(f"Could not read first frame: {files[0]}")
+                
+                self.framesBuffer = [first_frame]
+                self._pending_frame_files = None  # Frames will be loaded per-chunk during tracking
+                self._log(f"Loaded first frame for ROI setup (chunked video: {len(self._chunk_metadata)} chunks)")
+                
+            else:
+                # Single video - original behavior
+                self._chunk_metadata = None
+                
+                files = sorted(
+                    [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png")],
+                    key=lambda fp: int("".join([c for c in fp.stem if c.isdigit()]) or 0)
+                )
+                if not files:
+                    raise RuntimeError(f"No images found in {p}")
+                
+                # Check for cached masks
+                masks_dir = p / "cached_masks"
+                if masks_dir.exists() and self._try_load_cached_masks(masks_dir, len(files)):
+                    self._log(f"Loaded {len(self.masksBuffer)} cached masks from disk")
+                    # Enable filtering immediately
+                    self._setKeyframeFilterControlsEnabled(True)
+                    
+                    # Set default save location to frames directory if not already set
+                    if not self.saveRootDirPath:
+                        self.saveRootDirPath = str(p)
+                        self.saveRootDirButton.directory = str(p)
+                    
+                    self._setSaveControlsEnabled(browse_enabled=True, save_enabled=bool(self.saveRootDirPath))
+                    if self.saveRootDirPath:
+                        self.saveStatusLabel.setText(f"Ready to save to: {self.saveRootDirPath}")
+                    else:
+                        self.saveStatusLabel.setText("Select a save folder…")
+                else:
+                    self._log("No cached masks found - tracking will be required")
+                
+                # Load ONLY the first frame immediately
+                first_frame = cv2.imread(str(files[0]), cv2.IMREAD_COLOR)
+                if first_frame is None:
+                    raise RuntimeError(f"Could not read first frame: {files[0]}")
+                
+                # Store the first frame and the file list for later
+                self.framesBuffer = [first_frame]
+                self._pending_frame_files = files  # Store for loading after ROI finalization
+                self._log(f"Loaded first frame for ROI setup ({len(files)} total frames)")
+            
+            # Set up ROI immediately on first frame
             self._setupROIOnFirstFrame()
             
         except Exception as e:
-            self._log(f"Loading frames or ROI setup failed: {e}")
-            slicer.util.errorDisplay(f"Loading frames or ROI setup failed:\n{e}")
+            self._log(f"Loading first frame or ROI setup failed: {e}")
+            slicer.util.errorDisplay(f"Loading first frame or ROI setup failed:\n{e}")
         finally:
             self._setBusy(False)
 
@@ -1520,7 +1647,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
                 self.finalizeROIBtn.setEnabled(True)
                 slicer.util.infoDisplay(
-                    "ROI placement complete. Drag handles to adjust. Click 'Finalize ROI (Save BBox)' to proceed.",
+                    "ROI placement complete. Drag handles to adjust. Click 'Finalize ROI & Run Tracking' to proceed.",
                     autoCloseMsec=5000
                 )
             finally:
@@ -1531,7 +1658,6 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         )
 
         self.finalizeROIBtn.setEnabled(True)
-        self.trackBtn.setEnabled(False)
 
     def onFinalizeROI(self):
         if not self._roiNode or not self._firstFrameVectorNode:
@@ -1552,8 +1678,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.bbox_xywh = (int(x_o), int(y_o), int(w_o), int(h_o))
 
         self._log(f"Finalized ROI: DISPLAYED (x,y,w,h) = {bbox_d}  ?  ORIGINAL (x,y,w,h) = {self.bbox_xywh}")
-        self.trackBtn.setEnabled(True)
-
+        
+        # Save bbox settings
         s = qt.QSettings()
         s.setValue(self.SETTINGS_BBOX, ",".join(map(str, self.bbox_xywh)))
         frames_dir = self.framesDirEdit.text.strip()
@@ -1576,6 +1702,9 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             pass
         self._roiNode = None
         self.finalizeROIBtn.setEnabled(False)
+        
+        # Automatically start SAMURAI tracking
+        self.onRunTracking()
 
     def _compute_bbox_from_roi(self, volumeNode, roiNode):
         if volumeNode is None or roiNode is None or volumeNode.GetImageData() is None:
@@ -1617,8 +1746,6 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             slicer.util.messageBox("Please finalize an ROI first.")
             return
 
-        # self._prepare_cuda_runtime_visibility(log=False)
-
         device = self._comboText(self.deviceCombo).strip()
         s = qt.QSettings()
         s.setValue(self.SETTINGS_CKPT_PATH, ckpt)
@@ -1645,62 +1772,144 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         self._setBusy(True)
         try:
-            predictor = self._build_samurai_predictor(ckpt, device)
-
-            n_frames = 0
-            try:
-                if self.framesBuffer is not None:
-                    n_frames = len(self.framesBuffer)
-                else:
-                    n_frames = len([p for p in Path(frames_dir).glob("*.jpg")])
-            except Exception:
-                pass
-            if n_frames <= 0:
-                import cv2
-                cap = cv2.VideoCapture(mp4_path)
-                n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-                cap.release()
-            if n_frames <= 1:
-                raise RuntimeError("Could not determine the number of frames (>1 required).")
-
-            self._log(f"Running SAMURAI tracking on {n_frames} frames?")
-            masks_map = self._run_tracking(mp4_path, self.bbox_xywh, predictor, n_frames, device)
-
-            # Keep masks ONLY in memory
-            mem_masks = {}
-            saved = 0
-            for fid, mask_list in masks_map.items():
-                import numpy as np
-                agg = None
-                for t in mask_list:
-                    m = t.detach().float().cpu().numpy()
-                    if m.ndim == 3:
-                        m = (m > 0.5).any(axis=0).astype("uint8")
-                    else:
-                        m = (m > 0.5).astype("uint8")
-                    agg = m if agg is None else (agg | m)
-                if agg is None:
-                    continue
-                mem_masks[fid] = (agg * 255).astype("uint8")
-                saved += 1
-
-            self.masksBuffer = mem_masks
-            self._log(f"Tracking complete. {saved} masks are available in memory (no files were written).")
-
-            # Build masked frames once here (not on every filter click)
-            self._log("Preparing masked frames for keyframe filtering...")
-            try:
-                self._buildMaskedFramesBuffer()
-                self._log(f"Masked frames ready: {len(self.framesMaskedBuffer)} frames.")
-            except Exception as e:
-                self._log(f"WARNING: Could not build masked frames: {e}")
+            # CHUNKED PROCESSING
+            if self._chunk_metadata:
+                self._log(f"Processing {len(self._chunk_metadata)} chunks...")
+                all_masks = {}
+                
+                if VideoChunker is None:
+                    raise RuntimeError("VideoChunker not available for chunked processing")
+                
+                chunker = VideoChunker(None, frames_dir, logger=self._log)
+                
+                for chunk_idx, chunk_info in enumerate(self._chunk_metadata):
+                    self._log(f"=== Chunk {chunk_idx+1}/{len(self._chunk_metadata)} ===")
+                    
+                    # 1. Build fresh predictor for this chunk (prevents state accumulation)
+                    predictor = self._build_samurai_predictor(ckpt, device)
+                    
+                    # 2. Extract frames for this chunk only
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    
+                    # 3. Run SAM tracking on chunk (reads from video file, no RAM loading needed)
+                    chunk_masks = self._run_tracking(
+                        chunk_info["video_path"],
+                        self.bbox_xywh,
+                        predictor,
+                        chunk_info["num_frames"],
+                        device
+                    )
+                    
+                    # 5. Convert masks to uint8 numpy immediately (release GPU tensors)
+                    chunk_masks_uint8 = self._convert_masks_to_uint8(chunk_masks)
+                    num_chunk_masks = len(chunk_masks_uint8)
+                    del chunk_masks  # Release tensor masks
+                    
+                    # 6. Remap to global indices
+                    for local_idx, mask_array in chunk_masks_uint8.items():
+                        global_idx = chunk_info["start_frame"] + local_idx
+                        all_masks[global_idx] = mask_array
+                    
+                    del chunk_masks_uint8  # Release temporary dict
+                    
+                    # 4. Cleanup chunk immediately
+                    del predictor  # Release predictor memory
+                    self.framesBuffer = None
+                    chunker.cleanup_chunk_frames(chunk_frames_dir)
+                    
+                    # Aggressive GPU memory cleanup
+                    if device.startswith("cuda"):
+                        import torch
+                        import gc
+                        gc.collect()  # Python garbage collection
+                        torch.cuda.empty_cache()  # PyTorch cache
+                        torch.cuda.synchronize()  # Wait for GPU operations to complete
+                    
+                    self._log(f"Chunk {chunk_idx+1} complete: {num_chunk_masks} masks")
+                
+                # Masks are already uint8 numpy arrays
+                self.masksBuffer = all_masks
+                self._log(f"All chunks complete: {len(self.masksBuffer)} total masks")
+                
+                # Cache masks to disk for future reloads
+                self._save_masks_to_cache(frames_dir)
+                
+                # For chunked videos, load frames on-demand for keyframe filtering if needed
+                # Don't preload 2000 frames - keyframe filter will reload as needed
                 self.framesMaskedBuffer = None
+                self.framesBuffer = None  # Clear to save RAM
+                
+            else:
+                # SINGLE CHUNK (existing behavior)
+                predictor = self._build_samurai_predictor(ckpt, device)
+                
+                # Load remaining frames if not already loaded
+                if hasattr(self, '_pending_frame_files') and self._pending_frame_files:
+                    import cv2
+                    files = self._pending_frame_files
+                    self._log(f"Loading remaining {len(files)-1} frames before tracking...")
+                    
+                    for i, fp in enumerate(files[1:], 2):
+                        im = cv2.imread(str(fp), cv2.IMREAD_COLOR)
+                        if im is None:
+                            self._log(f"WARNING: Could not read {fp}, skipping.")
+                            continue
+                        self.framesBuffer.append(im)
+                        if i % 200 == 0:
+                            self._log(f"Loaded {i}/{len(files)} frames...")
+                            slicer.app.processEvents()
+                    
+                    self._log(f"Finished loading {len(self.framesBuffer)} frames total")
+                    self._pending_frame_files = None
+                
+                n_frames = 0
+                try:
+                    if self.framesBuffer is not None:
+                        n_frames = len(self.framesBuffer)
+                    else:
+                        n_frames = len([p for p in Path(frames_dir).glob("*.jpg")])
+                except Exception:
+                    pass
+                if n_frames <= 0:
+                    import cv2
+                    cap = cv2.VideoCapture(mp4_path)
+                    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+                    cap.release()
+                if n_frames <= 1:
+                    raise RuntimeError("Could not determine the number of frames (>1 required).")
 
-            # Enable key-frame filtering and Save browse (Save button waits for folder selection)
+                self._log(f"Running SAMURAI tracking on {n_frames} frames…")
+                masks_map = self._run_tracking(mp4_path, self.bbox_xywh, predictor, n_frames, device)
+
+                # Convert to final format
+                mem_masks = self._convert_masks_to_uint8(masks_map)
+                self.masksBuffer = mem_masks
+                self._log(f"Tracking complete. {len(mem_masks)} masks available in memory.")
+                
+                # Cache masks to disk for future reloads
+                self._save_masks_to_cache(frames_dir)
+                
+                # Build masked frames (safe for ≤600 frames)
+                self._log("Preparing masked frames for keyframe filtering...")
+                try:
+                    self._buildMaskedFramesBuffer()
+                    self._log(f"Masked frames ready: {len(self.framesMaskedBuffer)} frames.")
+                except Exception as e:
+                    self._log(f"WARNING: Could not build masked frames: {e}")
+                    self.framesMaskedBuffer = None
+
+            # Enable controls
+            # Keyframe filtering: always enable, but will reload frames on-demand for chunked videos
             self._setKeyframeFilterControlsEnabled(True)
+            
+            # Set default save location to frames directory if not already set
+            if not self.saveRootDirPath:
+                self.saveRootDirPath = frames_dir
+                self.saveRootDirButton.directory = frames_dir
+            
             self._setSaveControlsEnabled(browse_enabled=True, save_enabled=bool(self.saveRootDirPath))
             if not self.saveRootDirPath:
-                self.saveStatusLabel.setText("Select a save folder?")
+                self.saveStatusLabel.setText("Select a save folder…")
             else:
                 self.saveStatusLabel.setText(f"Ready to save to: {self.saveRootDirPath}")
 
@@ -1709,6 +1918,23 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay(f"Tracking failed:\n{e}")
         finally:
             self._setBusy(False)
+    
+    def _convert_masks_to_uint8(self, masks_map: dict) -> dict:
+        """Convert tensor masks to uint8 numpy arrays."""
+        import numpy as np
+        mem_masks = {}
+        for fid, mask_list in masks_map.items():
+            agg = None
+            for t in mask_list:
+                m = t.detach().float().cpu().numpy()
+                if m.ndim == 3:
+                    m = (m > 0.5).any(axis=0).astype("uint8")
+                else:
+                    m = (m > 0.5).astype("uint8")
+                agg = m if agg is None else (agg | m)
+            if agg is not None:
+                mem_masks[fid] = (agg * 255).astype("uint8")
+        return mem_masks
 
     def _save_png_mask(self, path, mask_uint8):
         try:
@@ -1717,6 +1943,58 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         except Exception:
             import cv2
             cv2.imwrite(path, mask_uint8)
+    
+    def _save_masks_to_cache(self, frames_dir):
+        """Save masks to disk cache for fast reload."""
+        if not self.masksBuffer:
+            return
+        
+        try:
+            import cv2
+            from pathlib import Path
+            
+            masks_dir = Path(frames_dir) / "cached_masks"
+            masks_dir.mkdir(parents=True, exist_ok=True)
+            
+            self._log(f"Caching {len(self.masksBuffer)} masks to disk...")
+            
+            for frame_idx, mask_array in self.masksBuffer.items():
+                mask_path = masks_dir / f"mask_{frame_idx:06d}.png"
+                cv2.imwrite(str(mask_path), mask_array)
+            
+            self._log(f"Masks cached to {masks_dir}")
+        except Exception as e:
+            self._log(f"WARNING: Failed to cache masks: {e}")
+    
+    def _try_load_cached_masks(self, masks_dir, expected_count):
+        """Try to load masks from disk cache. Returns True if successful."""
+        try:
+            import cv2
+            from pathlib import Path
+            
+            mask_files = sorted(masks_dir.glob("mask_*.png"))
+            if len(mask_files) != expected_count:
+                self._log(f"Mask cache incomplete: found {len(mask_files)}, expected {expected_count}")
+                return False
+            
+            self._log(f"Loading {len(mask_files)} masks from cache...")
+            
+            loaded_masks = {}
+            for mask_path in mask_files:
+                # Extract frame index from filename (mask_000123.png -> 123)
+                frame_idx = int(mask_path.stem.split('_')[1])
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    self._log(f"WARNING: Could not read {mask_path}")
+                    return False
+                loaded_masks[frame_idx] = mask
+            
+            self.masksBuffer = loaded_masks
+            return True
+            
+        except Exception as e:
+            self._log(f"Failed to load cached masks: {e}")
+            return False
 
     def _stack_or_any(self, mask_list):
         import numpy as np
@@ -1886,11 +2164,20 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         except Exception:
             self.kfRatioLabel.setText(str(val))
 
-    def detect_keyframes(self, frames, masks, ratio=0.8):
+    def filter_similar_frames(self, frames, masks, similarity_threshold=0.80):
         """
-        ORB/BFMatcher-based key-frame detection optimized for performance.
-        Only stores indices, pre-converts masks, and reduces UI updates.
-        Returns (kept_indices_list,).
+        Fast similarity-based frame filtering for photogrammetry.
+        
+        Strategy:
+        1. Extract bounding box of masked region
+        2. Crop and downsample only the object region (ignore background)
+        3. Compute normalized MSE between consecutive kept frames
+        4. Keep frame only if dissimilarity > (1 - threshold)
+        
+        For photogrammetry: 0.80 threshold keeps frames with >20% change,
+        ensuring sufficient scene variation for reconstruction.
+        
+        Returns: List of kept frame indices.
         """
         import numpy as np
         import cv2
@@ -1898,83 +2185,183 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         if not frames:
             return []
 
-        # Pre-convert all masks to numpy arrays once (major optimization)
-        self._log("Pre-converting masks to numpy arrays...")
+        self._log(f"Filtering frames with similarity threshold: {similarity_threshold:.2f}")
+        
+        # Target size for comparison (smaller = faster)
+        target_size = 256
+        
+        # Pre-extract all masks and compute bounding boxes
+        H, W = frames[0].shape[:2]
         mask_cache = {}
+        bbox_cache = {}
+        
         if masks:
             for idx in range(len(frames)):
                 mask_entry = masks.get(idx)
                 if mask_entry is None:
-                    mask_cache[idx] = np.zeros(frames[0].shape[:2], np.uint8)
+                    mask_cache[idx] = np.zeros((H, W), np.uint8)
+                    bbox_cache[idx] = (0, 0, W, H)  # Full frame if no mask
                 else:
-                    mask_cache[idx] = self._extract_mask_array(mask_entry, frames[0].shape[:2])
+                    mask = self._extract_mask_array(mask_entry, (H, W))
+                    mask_cache[idx] = mask
+                    # Find bounding box of masked region
+                    coords = np.argwhere(mask > 0)
+                    if len(coords) > 0:
+                        y_min, x_min = coords.min(axis=0)
+                        y_max, x_max = coords.max(axis=0)
+                        bbox_cache[idx] = (int(x_min), int(y_min), int(x_max), int(y_max))
+                    else:
+                        bbox_cache[idx] = (0, 0, W, H)
         else:
-            # No masks - use empty masks
+            # No masks - use full frame
+            full_mask = np.ones((H, W), np.uint8) * 255
             for idx in range(len(frames)):
-                mask_cache[idx] = np.zeros(frames[0].shape[:2], np.uint8)
-
-        orb = cv2.ORB_create()
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, True)
-        kidx = [0]  # Only store indices, not full frames
-        ref_kp, ref_des = orb.detectAndCompute(frames[0], mask_cache[0])
-
-        # Prepare UI progress
-        total_iters = max(0, len(frames) - 1)
+                mask_cache[idx] = full_mask
+                bbox_cache[idx] = (0, 0, W, H)
+        
+        self._log("Computing frame-to-frame similarity in masked region...")
+        kept_indices = [0]  # Always keep first frame
+        ref_idx = 0
+        
+        total = len(frames) - 1
         if self.kfProgress:
             self.kfProgress.setVisible(True)
-            self.kfProgress.setRange(0, total_iters)
+            self.kfProgress.setRange(0, total)
             self.kfProgress.setValue(0)
             slicer.app.processEvents()
-
-        progressed = 0
-        update_interval = max(1, len(frames) // 50)  # Update progress ~50 times total
+        
+        update_interval = max(1, len(frames) // 50)
         
         for idx in range(1, len(frames)):
-            fr = frames[idx]
-            kp, des = orb.detectAndCompute(fr, mask_cache[idx])
+            # Process only the current frame and reference (on-demand)
+            ref_processed = self._process_masked_frame(frames[ref_idx], mask_cache[ref_idx], bbox_cache[ref_idx], target_size)
+            curr_processed = self._process_masked_frame(frames[idx], mask_cache[idx], bbox_cache[idx], target_size)
             
-            if not (ref_des is not None and des is not None and ref_kp):
-                kidx.append(idx)
-                ref_kp, ref_des = kp, des
-            else:
-                matches = bf.match(ref_des, des)
-                # identical criterion to prototype
-                if len(matches) / len(ref_kp) < ratio:
-                    kidx.append(idx)
-                    ref_kp, ref_des = kp, des
-
-            progressed += 1
-            # Update UI much less frequently (every ~2% of frames)
-            if self.kfProgress and (progressed % update_interval == 0 or progressed == total_iters):
-                self.kfProgress.setValue(progressed)
+            # Compute dissimilarity (lower = more similar)
+            dissimilarity = self._compute_frame_dissimilarity(ref_processed, curr_processed)
+            
+            # Keep frame if dissimilar enough (inverse of similarity threshold)
+            # similarity_threshold=0.80 means keep if dissimilarity > 0.20
+            if dissimilarity > (1.0 - similarity_threshold):
+                kept_indices.append(idx)
+                ref_idx = idx  # Update reference to last kept frame
+            
+            # Update progress
+            if self.kfProgress and (idx % update_interval == 0 or idx == total):
+                self.kfProgress.setValue(idx)
                 slicer.app.processEvents()
-
-        return kidx
+        
+        reduction_pct = (1 - len(kept_indices) / len(frames)) * 100
+        self._log(f"Filtering complete: kept {len(kept_indices)}/{len(frames)} frames ({reduction_pct:.1f}% reduction)")
+        
+        return kept_indices
+    
+    def _process_masked_frame(self, frame, mask, bbox, target_size):
+        """
+        Crop frame to masked region bounding box and resize for comparison.
+        Returns normalized grayscale image.
+        """
+        import numpy as np
+        import cv2
+        
+        x_min, y_min, x_max, y_max = bbox
+        
+        # Crop to bounding box
+        cropped = frame[y_min:y_max+1, x_min:x_max+1].copy()
+        cropped_mask = mask[y_min:y_max+1, x_min:x_max+1]
+        
+        # Apply mask within cropped region
+        mask_binary = (cropped_mask > 0).astype(np.uint8)
+        cropped_masked = cropped * mask_binary[:, :, np.newaxis]
+        
+        # Resize to fixed size for comparison
+        if cropped_masked.shape[0] > 0 and cropped_masked.shape[1] > 0:
+            resized = cv2.resize(cropped_masked, (target_size, target_size), interpolation=cv2.INTER_AREA)
+        else:
+            resized = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+        
+        # Convert to grayscale and normalize
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        
+        return gray
+    
+    def _compute_frame_dissimilarity(self, img1, img2):
+        """
+        Compute normalized mean squared error between two images.
+        
+        Returns dissimilarity score in [0, 1] where:
+            0.0 = identical images
+            1.0 = completely different images
+        
+        This is more intuitive than correlation - higher value = more different.
+        """
+        import numpy as np
+        
+        # Compute MSE only on non-zero pixels (ignore masked-out background)
+        mask = (img1 > 0) | (img2 > 0)
+        
+        if not np.any(mask):
+            return 0.0  # Both empty
+        
+        # Mean squared error on valid pixels
+        diff = (img1[mask] - img2[mask]) ** 2
+        mse = np.mean(diff)
+        
+        # Normalize to [0, 1] range (max possible MSE is 1.0 for normalized images)
+        dissimilarity = np.sqrt(mse)  # RMSE is more intuitive
+        
+        return dissimilarity
 
     def onFilterKeyframesClicked(self):
         # Preconditions
-        if not self.framesBuffer or len(self.framesBuffer) == 0:
-            slicer.util.messageBox("No frames are loaded. Use 'Load Frames From Folder' first.")
-            return
         if not isinstance(self.masksBuffer, dict) or len(self.masksBuffer) == 0:
-            slicer.util.messageBox("Masks are not available yet. Run 'Run SAMURAI Masking' first.")
-            return
-        if not self.framesMaskedBuffer or len(self.framesMaskedBuffer) == 0:
-            slicer.util.messageBox("Masked frames not prepared. Please run SAMURAI masking again.")
+            slicer.util.messageBox("Masks are not available yet. Finalize ROI to start tracking first.")
             return
 
         try:
-            ratio = float(self.kfSlider.value)
+            similarity_threshold = float(self.kfSlider.value)
         except Exception:
-            ratio = 0.8
+            similarity_threshold = 0.80
 
         self._setBusy(True)
         try:
+            # For chunked videos, reload frames on-demand
+            if self._chunk_metadata and (not self.framesBuffer or not self.framesMaskedBuffer):
+                self._log("Chunked video detected - loading all frames for keyframe filtering...")
+                frames_dir = Path(self.framesDirEdit.text.strip())
+                
+                # Reload all frames from chunks
+                self.framesBuffer = []
+                for chunk_info in self._chunk_metadata:
+                    if VideoChunker is None:
+                        raise RuntimeError("VideoChunker not available")
+                    
+                    chunker = VideoChunker(None, frames_dir, logger=self._log)
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    chunk_frames = self._load_frames_from_folder(chunk_frames_dir)
+                    self.framesBuffer.extend(chunk_frames)
+                    chunker.cleanup_chunk_frames(chunk_frames_dir)
+                    
+                    self._log(f"Loaded chunk {len(self.framesBuffer)} frames so far...")
+                    slicer.app.processEvents()
+                
+                self._log(f"Loaded all {len(self.framesBuffer)} frames. Building masked frames...")
+                self._buildMaskedFramesBuffer()
+                self._log(f"Masked frames ready: {len(self.framesMaskedBuffer)} frames.")
+            
+            # Check frames are now available
+            if not self.framesBuffer or len(self.framesBuffer) == 0:
+                slicer.util.messageBox("No frames are loaded. Use 'Load Frames From Folder' first.")
+                return
+            if not self.framesMaskedBuffer or len(self.framesMaskedBuffer) == 0:
+                slicer.util.messageBox("Masked frames not prepared. Please finalize ROI and run tracking again.")
+                return
+
             masked_frames = self.framesMaskedBuffer
             masks = self.masksBuffer
 
-            self._log(f"Starting key-frame filtering on MASKED frames (ratio={ratio:.2f}, N={len(masked_frames)})...")
-            kidx = self.detect_keyframes(masked_frames, masks, ratio=ratio)
+            self._log(f"Starting similarity-based filtering on MASKED frames (threshold={similarity_threshold:.2f}, N={len(masked_frames)})...")
+            kidx = self.filter_similar_frames(masked_frames, masks, similarity_threshold=similarity_threshold)
 
             # Store Stage-1 results - extract keyframes only once at the end
             self.keyFrameIndices = list(kidx)
@@ -2072,7 +2459,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         if not isinstance(self.framesBuffer, list) or len(self.framesBuffer) == 0:
             raise RuntimeError("No frames loaded; cannot build masked frames.")
         if not isinstance(self.masksBuffer, dict) or len(self.masksBuffer) == 0:
-            raise RuntimeError("No per-frame masks available; run SAMURAI masking first.")
+            raise RuntimeError("No per-frame masks available; finalize ROI to start tracking first.")
 
         N = len(self.framesBuffer)
         dlg = qt.QProgressDialog("Preparing masked frames…", "Cancel", 0, N, slicer.util.mainWindow())
@@ -2195,7 +2582,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         """
         # Guard: masks must exist, and folder must be selected
         if not (isinstance(self.masksBuffer, dict) and len(self.masksBuffer) > 0):
-            slicer.util.messageBox("Masks are not available yet. Run 'Run SAMURAI Masking' first.")
+            slicer.util.messageBox("Masks are not available yet. Finalize ROI to start tracking first.")
             return
         save_root = (self.saveRootDirPath or "").strip()
         if not save_root or not os.path.isdir(save_root):
@@ -2209,9 +2596,30 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             indices = list(self.keyFrameIndices)
             self._log(f"Saving key-frame selection: {len(frames_to_save)} frames.")
         else:
-            if not isinstance(self.framesBuffer, list) or not self.framesBuffer:
-                slicer.util.messageBox("No frames are loaded.")
-                return
+            # Need to load all frames if not already loaded (e.g., when masks loaded from cache)
+            if not isinstance(self.framesBuffer, list) or len(self.framesBuffer) <= 1:
+                # Check if we have pending frame files or chunked video
+                if self._chunk_metadata:
+                    # Chunked video - need to load all frames from chunks
+                    slicer.util.messageBox(
+                        "For chunked videos, please use Frame Similarity Filtering to select frames before saving.\n"
+                        "This avoids loading all frames into memory at once."
+                    )
+                    return
+                elif hasattr(self, '_pending_frame_files') and self._pending_frame_files:
+                    # Load all frames from file list
+                    import cv2
+                    self._log(f"Loading all {len(self._pending_frame_files)} frames for saving...")
+                    self.framesBuffer = []
+                    for fp in self._pending_frame_files:
+                        im = cv2.imread(str(fp), cv2.IMREAD_COLOR)
+                        if im is not None:
+                            self.framesBuffer.append(im)
+                    self._log(f"Loaded {len(self.framesBuffer)} frames.")
+                else:
+                    slicer.util.messageBox("No frames are loaded.")
+                    return
+            
             frames_to_save = list(self.framesBuffer)
             indices = list(range(len(frames_to_save)))
             self._log(f"Saving all frames: {len(frames_to_save)} frames.")
