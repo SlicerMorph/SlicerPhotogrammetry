@@ -386,6 +386,11 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 pass
         tform.addRow("Device:", self.deviceCombo)
 
+        trow2 = qt.QHBoxLayout()
+        self.loadFramesAndROIBtn = qt.QPushButton("Load Frames & Set ROI")
+        self.loadFramesAndROIBtn.setToolTip("Load extracted frames into Slicer and display the first frame for ROI selection")
+        self.finalizeROIBtn = qt.QPushButton("Finalize ROI & Run Tracking")
+        self.finalizeROIBtn.setEnabled(False)
         trow2.addWidget(self.loadFramesAndROIBtn)
         trow2.addWidget(self.finalizeROIBtn)
         tform.addRow(trow2)
