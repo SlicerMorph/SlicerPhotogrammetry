@@ -1808,7 +1808,17 @@ class PhotoMaskingWidget(ScriptedLoadableModuleWidget):
             aruco_dict = cv2.aruco.DICT_4X4_50
 
         dictionary = cv2.aruco.getPredefinedDictionary(aruco_dict)
-        corners, ids, rejected = cv2.aruco.detectMarkers(cv_img, dictionary)
+        
+        # Handle OpenCV API change (4.6 vs 4.7+)
+        try:
+            # OpenCV 4.7+ uses ArucoDetector
+            detector_params = cv2.aruco.DetectorParameters()
+            detector = cv2.aruco.ArucoDetector(dictionary, detector_params)
+            corners, ids, rejected = detector.detectMarkers(cv_img)
+        except AttributeError:
+            # OpenCV 4.6 and earlier uses module-level function
+            corners, ids, rejected = cv2.aruco.detectMarkers(cv_img, dictionary)
+        
         bounding_boxes = []
         if ids is not None:
             for i in range(len(ids)):
