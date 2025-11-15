@@ -2330,6 +2330,88 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         self._setBusy(True)
         try:
+            # For chunked videos, process filtering chunk-by-chunk to avoid loading all frames
+            if self._chunk_metadata:
+                self._log(f"Chunked video detected - processing {len(self._chunk_metadata)} chunks sequentially...")
+                frames_dir = Path(self.framesDirEdit.text.strip())
+                
+                # Track kept frames across all chunks
+                all_kept_indices = []
+                last_kept_frame = None
+                last_kept_idx = -1
+                
+                for chunk_idx, chunk_info in enumerate(self._chunk_metadata):
+                    if VideoChunker is None:
+                        raise RuntimeError("VideoChunker not available")
+                    
+                    self._log(f"Processing chunk {chunk_idx+1}/{len(self._chunk_metadata)}...")
+                    
+                    # Load this chunk's frames
+                    chunker = VideoChunker(None, frames_dir, logger=self._log)
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    chunk_frames = self._load_frames_from_folder(chunk_frames_dir)
+                    
+                    # Build masked frames for this chunk
+                    chunk_masked_frames = []
+                    for local_idx, frame in enumerate(chunk_frames):
+                        global_idx = chunk_info["start_frame"] + local_idx
+                        mask = self.masksBuffer.get(global_idx)
+                        if mask is not None:
+                            masked = self._build_masked_frame_from_bgr_and_mask(frame, mask)
+                            chunk_masked_frames.append(masked)
+                        else:
+                            chunk_masked_frames.append(frame)
+                    
+                    # Filter this chunk (compare against last kept frame from previous chunk)
+                    chunk_masks = {local_idx: self.masksBuffer.get(chunk_info["start_frame"] + local_idx) 
+                                   for local_idx in range(len(chunk_frames))}
+                    
+                    if last_kept_frame is not None:
+                        # Insert reference frame at beginning for comparison
+                        chunk_masked_frames.insert(0, last_kept_frame)
+                        chunk_kept = self.filter_similar_frames([last_kept_frame] + chunk_masked_frames, 
+                                                                chunk_masks, similarity_threshold)
+                        # Remove reference frame index (0) and adjust indices
+                        chunk_kept = [i - 1 for i in chunk_kept if i > 0]
+                    else:
+                        # First chunk - no reference frame
+                        chunk_kept = self.filter_similar_frames(chunk_masked_frames, chunk_masks, similarity_threshold)
+                    
+                    # Convert local indices to global and track kept frames
+                    for local_idx in chunk_kept:
+                        global_idx = chunk_info["start_frame"] + local_idx
+                        all_kept_indices.append(global_idx)
+                        last_kept_frame = chunk_masked_frames[local_idx]
+                        last_kept_idx = global_idx
+                    
+                    # Cleanup chunk
+                    del chunk_frames
+                    del chunk_masked_frames
+                    chunker.cleanup_chunk_frames(chunk_frames_dir)
+                    
+                    self._log(f"Chunk {chunk_idx+1}: kept {len(chunk_kept)} frames")
+                    slicer.app.processEvents()
+                
+                # Store results without loading all frames
+                self.keyFrameIndices = all_kept_indices
+                self.keyFramesBuffer = None  # Don't load all frames
+                self.keyFramesMaskedBuffer = None
+                
+                # Store only kept masks
+                kept_masks = {new_i: self.masksBuffer.get(orig_i) for new_i, orig_i in enumerate(all_kept_indices)}
+                self.keyMasksBuffer = kept_masks
+                
+                kept = len(all_kept_indices)
+                total = sum(c["num_frames"] for c in self._chunk_metadata)
+                pct = (kept / total * 100.0) if total > 0 else 0.0
+                self._log(f"Filtering complete: kept {kept}/{total} frames ({pct:.1f}%) across {len(self._chunk_metadata)} chunks")
+                
+                if self.kfProgress:
+                    self.kfProgress.setVisible(False)
+                
+                return
+            
+            # Single video - original behavior (load all frames)
             # For chunked videos, reload frames on-demand
             if self._chunk_metadata and (not self.framesBuffer or not self.framesMaskedBuffer):
                 self._log("Chunked video detected - loading all frames for keyframe filtering...")
