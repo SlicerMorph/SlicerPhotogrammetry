@@ -346,7 +346,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.framesDirEdit.readOnly = True
         vform.addRow("Frames folder:", self.framesDirEdit)
 
-        self.loadVideoBtn = qt.QPushButton("Load Video (Convert if MOV, then Extract Frames)")
+        self.loadVideoBtn = qt.QPushButton("Process Video")
         vform.addRow(self.loadVideoBtn)
 
         self.videoBrowseBtn.clicked.connect(self.onBrowseVideo)
@@ -417,7 +417,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.kfSlider = ctk.ctkDoubleSlider()
         self.kfSlider.orientation = qt.Qt.Horizontal
         self.kfSlider.minimum = 0.60
-        self.kfSlider.maximum = 0.95
+        self.kfSlider.maximum = 0.99
         self.kfSlider.singleStep = 0.01
         self.kfSlider.pageStep = 0.05
         self.kfSlider.value = 0.80
