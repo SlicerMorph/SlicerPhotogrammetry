@@ -2738,33 +2738,33 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 slicer.util.messageBox("No filtered frames available.")
                 return
         else:
-            # Need to load all frames if not already loaded (e.g., when masks loaded from cache)
-            if not isinstance(self.framesBuffer, list) or len(self.framesBuffer) <= 1:
-                # Check if we have pending frame files or chunked video
-                if self._chunk_metadata:
-                    # Chunked video - need to load all frames from chunks
-                    slicer.util.messageBox(
-                        "For chunked videos, please use Frame Similarity Filtering to select frames before saving.\n"
-                        "This avoids loading all frames into memory at once."
-                    )
-                    return
-                elif hasattr(self, '_pending_frame_files') and self._pending_frame_files:
-                    # Load all frames from file list
-                    import cv2
-                    self._log(f"Loading all {len(self._pending_frame_files)} frames for saving...")
-                    self.framesBuffer = []
-                    for fp in self._pending_frame_files:
-                        im = cv2.imread(str(fp), cv2.IMREAD_COLOR)
-                        if im is not None:
-                            self.framesBuffer.append(im)
-                    self._log(f"Loaded {len(self.framesBuffer)} frames.")
-                else:
-                    slicer.util.messageBox("No frames are loaded.")
-                    return
-            
-            frames_to_save = list(self.framesBuffer)
-            indices = list(range(len(frames_to_save)))
-            self._log(f"Saving all frames: {len(frames_to_save)} frames.")
+            # Saving all frames - but avoid loading them all into memory at once
+            if self._chunk_metadata:
+                # Chunked video: process on-demand chunk by chunk
+                frames_to_save = None  # Signal to save method to load on-demand
+                total_frames = sum(c["num_frames"] for c in self._chunk_metadata)
+                indices = list(range(total_frames))
+                self._log(f"Saving all {total_frames} frames from {len(self._chunk_metadata)} chunks (on-demand processing)...")
+            elif hasattr(self, '_pending_frame_files') and self._pending_frame_files:
+                # Small video with pending files - load all frames
+                import cv2
+                self._log(f"Loading all {len(self._pending_frame_files)} frames for saving...")
+                self.framesBuffer = []
+                for fp in self._pending_frame_files:
+                    im = cv2.imread(str(fp), cv2.IMREAD_COLOR)
+                    if im is not None:
+                        self.framesBuffer.append(im)
+                self._log(f"Loaded {len(self.framesBuffer)} frames.")
+                frames_to_save = list(self.framesBuffer)
+                indices = list(range(len(frames_to_save)))
+            elif isinstance(self.framesBuffer, list) and len(self.framesBuffer) > 1:
+                # Already loaded in memory
+                frames_to_save = list(self.framesBuffer)
+                indices = list(range(len(frames_to_save)))
+                self._log(f"Saving all frames: {len(frames_to_save)} frames.")
+            else:
+                slicer.util.messageBox("No frames are loaded.")
+                return
 
         # Make sure save deps exist (Pillow, piexif, pymediainfo)
         try:
@@ -2779,7 +2779,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         focal_mm, focal35, make, model = self._extract_video_metadata(video_path)
 
         # Progress UI
-        total = len(frames_to_save)
+        total = len(frames_to_save) if frames_to_save is not None else len(indices)
         self.saveProgress.setVisible(True)
         self.saveProgress.setRange(0, total)
         self.saveProgress.setValue(0)
@@ -2916,6 +2916,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 masked/Set1/     -> masked frames    (videoStem_index.jpg)
                                     binary masks     (videoStem_index_mask.jpg)
         EXIF is embedded on every JPEG.
+        
+        If frames is None, this signals on-demand processing for chunked videos.
         """
         import cv2
         os.makedirs(save_root_dir, exist_ok=True)
@@ -2931,6 +2933,15 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         except Exception:
             stem = "frames"
 
+        # Handle on-demand processing for chunked videos
+        if frames is None and self._chunk_metadata:
+            self._save_chunked_on_demand(
+                save_root_dir, original_dir, masked_dir, stem,
+                frame_indices, all_masks, focal_mm, focal35, make, model
+            )
+            return
+
+        # Regular processing (frames already in memory)
         total = len(frames)
         for i, fr in enumerate(frames):
             idx = frame_indices[i] if i < len(frame_indices) else i
@@ -2941,43 +2952,9 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             cv2.imwrite(orig_path, fr)
             self._embed_exif_into_jpg(orig_path, focal_mm, focal35, make, model)
 
-            # (B) mask (uint8 0/255) ? derive from in-memory dict; fall back to zeros if missing
+            # (B) mask (uint8 0/255) – derive from in-memory dict; fall back to zeros if missing
             H, W = fr.shape[:2]
-            mask_u8 = None
-            try:
-                mm = all_masks.get(idx, None)
-                if mm is None:
-                    mask_u8 = None
-                else:
-                    # Your masksBuffer stores an already-binarized uint8 0/255 array per fid
-                    # (see onRunTracking). If some entries are tensors or arrays, normalize.
-                    import numpy as np
-                    if hasattr(mm, "detach") and hasattr(mm, "cpu"):  # torch Tensor style
-                        m = mm.detach().float().cpu().numpy()
-                        if m.ndim == 3:
-                            m = (m > 0.5).any(axis=0).astype("uint8")
-                        else:
-                            m = (m > 0.5).astype("uint8")
-                        mask_u8 = (m * 255).astype("uint8")
-                    else:
-                        m = mm
-                        try:
-                            import numpy as np
-                            m = np.asarray(m)
-                            if m.dtype != np.uint8:
-                                m = ((m > 0) * 255).astype("uint8")
-                            # resize if needed
-                            if m.ndim == 2 and (m.shape[0] != H or m.shape[1] != W):
-                                m = cv2.resize(m, (W, H), interpolation=cv2.INTER_NEAREST)
-                        except Exception:
-                            m = None
-                        mask_u8 = m
-            except Exception:
-                mask_u8 = None
-
-            if mask_u8 is None:
-                import numpy as np
-                mask_u8 = np.zeros((H, W), dtype="uint8")
+            mask_u8 = self._extract_mask_uint8(all_masks.get(idx), (H, W))
 
             # Save mask (_mask.jpg)
             mask_path = os.path.join(masked_dir, f"{basename}_mask.jpg")
@@ -2996,6 +2973,175 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 slicer.app.processEvents()
             except Exception:
                 pass
+    
+    def _extract_mask_uint8(self, mask_entry, shape_hw):
+        """
+        Extract and normalize a mask to uint8 0/255 format.
+        Returns zeros if mask_entry is None.
+        """
+        import numpy as np
+        import cv2
+        
+        H, W = shape_hw
+        
+        if mask_entry is None:
+            return np.zeros((H, W), dtype=np.uint8)
+        
+        # Handle torch tensors
+        if hasattr(mask_entry, "detach") and hasattr(mask_entry, "cpu"):
+            m = mask_entry.detach().float().cpu().numpy()
+            if m.ndim == 3:
+                m = (m > 0.5).any(axis=0).astype("uint8")
+            else:
+                m = (m > 0.5).astype("uint8")
+            mask_u8 = (m * 255).astype("uint8")
+        else:
+            # Handle numpy arrays or other array-like
+            try:
+                m = np.asarray(mask_entry)
+                if m.dtype != np.uint8:
+                    m = ((m > 0) * 255).astype("uint8")
+                # resize if needed
+                if m.ndim == 2 and (m.shape[0] != H or m.shape[1] != W):
+                    m = cv2.resize(m, (W, H), interpolation=cv2.INTER_NEAREST)
+                mask_u8 = m
+            except Exception:
+                mask_u8 = np.zeros((H, W), dtype=np.uint8)
+        
+        return mask_u8
+    
+    def _save_chunked_on_demand(self, save_root_dir, original_dir, masked_dir, stem,
+                                frame_indices, all_masks, focal_mm, focal35, make, model):
+        """
+        Save chunked video frames on-demand without loading all into memory.
+        Processes chunk by chunk with parallel I/O (4 threads) for faster saving.
+        """
+        import cv2
+        from pathlib import Path
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        
+        if VideoChunker is None:
+            raise RuntimeError("VideoChunker not available for on-demand processing")
+        
+        frames_dir = Path(self.framesDirEdit.text.strip())
+        chunker = VideoChunker(None, frames_dir, logger=self._log)
+        
+        total_frames = len(frame_indices)
+        processed_lock = threading.Lock()
+        processed_count = [0]  # Use list for mutability in closure
+        
+        self._log(f"Processing {len(self._chunk_metadata)} chunks on-demand with 4-thread parallel I/O...")
+        
+        def process_frame(frame_file, global_idx):
+            """Process a single frame: load, mask, save all outputs."""
+            import cv2
+            
+            # Load frame from disk
+            fr = cv2.imread(str(frame_file), cv2.IMREAD_COLOR)
+            if fr is None:
+                return False
+            
+            basename = f"{stem}_{global_idx:06d}"
+            H, W = fr.shape[:2]
+            
+            # (A) Save original
+            orig_path = os.path.join(original_dir, f"{basename}.jpg")
+            cv2.imwrite(orig_path, fr)
+            self._embed_exif_into_jpg(orig_path, focal_mm, focal35, make, model)
+            
+            # (B) Load cached mask and save
+            mask_u8 = self._load_cached_mask(frames_dir, global_idx, (H, W))
+            mask_path = os.path.join(masked_dir, f"{basename}_mask.jpg")
+            cv2.imwrite(mask_path, mask_u8)
+            self._embed_exif_into_jpg(mask_path, focal_mm, focal35, make, model)
+            
+            # (C) Create and save masked frame
+            masked_bgr = self._build_masked_frame_from_bgr_and_mask(fr, mask_u8)
+            masked_path = os.path.join(masked_dir, f"{basename}.jpg")
+            cv2.imwrite(masked_path, masked_bgr)
+            self._embed_exif_into_jpg(masked_path, focal_mm, focal35, make, model)
+            
+            # Update progress counter thread-safely (but don't update UI from worker thread)
+            with processed_lock:
+                processed_count[0] += 1
+            
+            return True
+        
+        # Process chunks with parallel I/O (4 threads)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for chunk_idx, chunk_info in enumerate(self._chunk_metadata):
+                self._log(f"Processing chunk {chunk_idx+1}/{len(self._chunk_metadata)}...")
+                
+                # Extract frames for this chunk
+                chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                frame_files = sorted(chunk_frames_dir.glob("*.jpg"))
+                
+                # Prepare tasks for frames in this chunk
+                tasks = []
+                for local_idx, frame_file in enumerate(frame_files):
+                    global_idx = chunk_info["start_frame"] + local_idx
+                    if global_idx in frame_indices:
+                        tasks.append((frame_file, global_idx))
+                
+                # Submit all tasks for this chunk in parallel
+                futures = [executor.submit(process_frame, ff, gi) for ff, gi in tasks]
+                
+                # Wait for all tasks in this chunk to complete
+                completed = 0
+                for future in futures:
+                    try:
+                        if future.result():
+                            completed += 1
+                            # Update UI from main thread only
+                            if completed % 5 == 0:
+                                try:
+                                    self.saveProgress.setValue(processed_count[0])
+                                    slicer.app.processEvents()
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        self._log(f"WARNING: Frame processing failed: {e}")
+                
+                # Final UI update for this chunk
+                try:
+                    self.saveProgress.setValue(processed_count[0])
+                    slicer.app.processEvents()
+                except Exception:
+                    pass
+                
+                # Cleanup chunk
+                chunker.cleanup_chunk_frames(chunk_frames_dir)
+                self._log(f"Chunk {chunk_idx+1} complete ({processed_count[0]}/{total_frames} total frames)")
+        
+        self._log(f"On-demand processing complete: {processed_count[0]} frames saved")
+    
+    def _load_cached_mask(self, frames_dir, frame_idx, shape_hw):
+        """
+        Load a mask from the cached_masks folder.
+        Falls back to extracting from masksBuffer if cache file not found.
+        """
+        import cv2
+        import numpy as np
+        from pathlib import Path
+        
+        H, W = shape_hw
+        
+        # Try loading from cache first
+        mask_path = Path(frames_dir) / "cached_masks" / f"mask_{frame_idx:06d}.png"
+        if mask_path.exists():
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is not None:
+                return mask
+        
+        # Fallback: extract from masksBuffer (should already be cached though)
+        if hasattr(self, 'masksBuffer') and self.masksBuffer:
+            mask_entry = self.masksBuffer.get(frame_idx)
+            if mask_entry is not None:
+                return self._extract_mask_uint8(mask_entry, (H, W))
+        
+        # Last resort: return zeros
+        return np.zeros((H, W), dtype=np.uint8)
 
 
 # -------------------------
