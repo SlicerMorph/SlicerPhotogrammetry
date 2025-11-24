@@ -28,7 +28,7 @@ class VideoChunker:
     # Frame limits
     MAX_FRAMES_TOTAL = 2000  # Hard limit (~33s @ 60fps)
     MIN_CHUNK_FRAMES = 240   # 4s @ 60fps (safe for 4K on 48GB GPU)
-    MAX_CHUNK_FRAMES = 300   # 5s @ 60fps (conservative for 4K)
+    MAX_CHUNK_FRAMES = 400   # ~6.7s @ 60fps (~13.3GB VRAM for 4K)
     
     def __init__(self, video_path=None, output_dir=None, logger=None):
         """

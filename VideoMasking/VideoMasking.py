@@ -1781,6 +1781,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             if self._chunk_metadata:
                 self._log(f"Processing {len(self._chunk_metadata)} chunks...")
                 all_masks = {}
+                prev_last_mask = None  # Track last mask from previous chunk for continuity
                 
                 if VideoChunker is None:
                     raise RuntimeError("VideoChunker not available for chunked processing")
@@ -1796,19 +1797,27 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                     # 2. Extract frames for this chunk only
                     chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
                     
-                    # 3. Run SAM tracking on chunk (reads from video file, no RAM loading needed)
-                    chunk_masks = self._run_tracking(
+                    # 3. Run SAM tracking on chunk with mask propagation from previous chunk
+                    # First chunk uses bbox, subsequent chunks use mask from previous chunk
+                    chunk_masks = self._run_tracking_with_mask_propagation(
                         chunk_info["video_path"],
                         self.bbox_xywh,
                         predictor,
                         chunk_info["num_frames"],
-                        device
+                        device,
+                        prev_mask=prev_last_mask  # None for first chunk, mask array for subsequent
                     )
                     
-                    # 5. Convert masks to uint8 numpy immediately (release GPU tensors)
+                    # 4. Convert masks to uint8 numpy immediately (release GPU tensors)
                     chunk_masks_uint8 = self._convert_masks_to_uint8(chunk_masks)
                     num_chunk_masks = len(chunk_masks_uint8)
                     del chunk_masks  # Release tensor masks
+                    
+                    # 5. Extract last mask from this chunk for next chunk initialization
+                    if chunk_masks_uint8:
+                        max_local_idx = max(chunk_masks_uint8.keys())
+                        prev_last_mask = chunk_masks_uint8[max_local_idx].copy()
+                        self._log(f"Saved last mask (local frame {max_local_idx}) for next chunk")
                     
                     # 6. Remap to global indices
                     for local_idx, mask_array in chunk_masks_uint8.items():
@@ -1817,7 +1826,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                     
                     del chunk_masks_uint8  # Release temporary dict
                     
-                    # 4. Cleanup chunk immediately
+                    # 7. Cleanup chunk immediately
                     del predictor  # Release predictor memory
                     self.framesBuffer = None
                     chunker.cleanup_chunk_frames(chunk_frames_dir)
@@ -2066,6 +2075,76 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                     torch.cuda.empty_cache()
             except Exception:
                 pass
+        return masks
+
+    def _run_tracking_with_mask_propagation(self, video_path: str, bbox_xywh, predictor, 
+                                           n_frames: int, device: str, prev_mask=None):
+        """
+        Run tracking on a video chunk with optional mask propagation from previous chunk.
+        
+        Args:
+            video_path: Path to the video/chunk file
+            bbox_xywh: Bounding box (x, y, w, h) for initial ROI
+            predictor: SAM2 video predictor instance
+            n_frames: Number of frames in this chunk
+            device: Device string ("cuda" or "cpu")
+            prev_mask: Optional mask array from last frame of previous chunk (uint8, 2D)
+        
+        Returns:
+            Dictionary mapping frame indices to mask lists
+        """
+        try:
+            import torch
+            import numpy as np
+            from contextlib import nullcontext
+        except Exception as e:
+            raise RuntimeError(f"PyTorch not available: {e}")
+        
+        autocast_ctx = torch.autocast("cuda", dtype=torch.float16) if device.lower().startswith("cuda") else nullcontext()
+        masks = {}
+        
+        with torch.inference_mode(), autocast_ctx:
+            state = predictor.init_state(video_path, offload_video_to_cpu=True)
+            
+            if prev_mask is not None:
+                # Use mask from previous chunk to initialize tracking
+                # Extract bbox from mask for continuity
+                self._log(f"Initializing chunk with mask from previous chunk")
+                import cv2
+                # Find bounding box of the mask
+                coords = np.column_stack(np.where(prev_mask > 127))
+                if len(coords) > 0:
+                    y_min, x_min = coords.min(axis=0)
+                    y_max, x_max = coords.max(axis=0)
+                    x, y, w, h = int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)
+                    self._log(f"Propagated ROI from mask: ({x}, {y}, {w}, {h})")
+                    predictor.add_new_points_or_box(state, box=(x, y, x + w, y + h), frame_idx=0, obj_id=0)
+                else:
+                    # Empty mask, use original bbox
+                    self._log("WARNING: Mask is empty, using original bbox")
+                    x, y, w, h = [int(v) for v in bbox_xywh]
+                    predictor.add_new_points_or_box(state, box=(x, y, x + w, y + h), frame_idx=0, obj_id=0)
+            else:
+                # First chunk: use original bbox
+                x, y, w, h = [int(v) for v in bbox_xywh]
+                self._log(f"Tracking ROI (x,y,w,h) = {x,y,w,h}")
+                predictor.add_new_points_or_box(state, box=(x, y, x + w, y + h), frame_idx=0, obj_id=0)
+            
+            # Propagate through video
+            progressed = 0
+            for fid, _, mask_list in predictor.propagate_in_video(state):
+                masks[fid] = mask_list
+                progressed += 1
+                if progressed % 50 == 0:
+                    self._log(f"Propagated {progressed}/{max(1, n_frames-1)} frames…")
+                    slicer.app.processEvents()
+            
+            try:
+                if device.lower().startswith("cuda"):
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        
         return masks
 
     def _sam2_config_candidates(self, short_name: str) -> list[str]:
