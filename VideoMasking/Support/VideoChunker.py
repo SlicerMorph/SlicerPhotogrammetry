@@ -237,7 +237,7 @@ class VideoChunker:
         
         # Extract frame 1 as 000001.jpg (to match frame numbering convention)
         output_path = first_frame_dir / "000001.jpg"
-        ffmpeg_cmd = f'ffmpeg -y -i "{first_chunk_path}" -vframes 1 "{output_path}"'
+        ffmpeg_cmd = f'ffmpeg -y -i "{first_chunk_path}" -vframes 1 -q:v 2 "{output_path}"'
         
         self._log(f"Extracting first frame for ROI setup...")
         
@@ -281,7 +281,7 @@ class VideoChunker:
         
         # Extract frames with sequential numbering starting from 1
         output_pattern = chunk_frames_dir / "%06d.jpg"
-        ffmpeg_cmd = f'ffmpeg -y -i "{chunk_path}" "{output_pattern}"'
+        ffmpeg_cmd = f'ffmpeg -y -i "{chunk_path}" -q:v 2 "{output_pattern}"'
         
         self._log(f"Extracting frames for chunk {chunk_idx}...")
         

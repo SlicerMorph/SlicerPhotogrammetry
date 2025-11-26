@@ -1347,7 +1347,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 break
             idx += 1
             fpath = str(Path(frames_dir) / f"frame_{idx:07d}.jpg")
-            cv2.imwrite(fpath, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            cv2.imwrite(fpath, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             wrote += 1
             if wrote % 250 == 0:
                 self._log(f"Extracted {wrote}/{total if total else '?'} frames?")
@@ -1953,10 +1953,10 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
     def _save_png_mask(self, path, mask_uint8):
         try:
             from PIL import Image
-            Image.fromarray(mask_uint8, mode="L").save(path)
+            Image.fromarray(mask_uint8, mode="L").save(path, quality=100)
         except Exception:
             import cv2
-            cv2.imwrite(path, mask_uint8)
+            cv2.imwrite(path, mask_uint8, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
     
     def _save_masks_to_cache(self, frames_dir):
         """Save masks to disk cache for fast reload."""
@@ -1974,7 +1974,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             
             for frame_idx, mask_array in self.masksBuffer.items():
                 mask_path = masks_dir / f"mask_{frame_idx:06d}.png"
-                cv2.imwrite(str(mask_path), mask_array)
+                cv2.imwrite(str(mask_path), mask_array, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             
             self._log(f"Masks cached to {masks_dir}")
         except Exception as e:
@@ -3028,7 +3028,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
             # (A) original
             orig_path = os.path.join(original_dir, f"{basename}.jpg")
-            cv2.imwrite(orig_path, fr)
+            cv2.imwrite(orig_path, fr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             self._embed_exif_into_jpg(orig_path, focal_mm, focal35, make, model)
 
             # (B) mask (uint8 0/255) – derive from in-memory dict; fall back to zeros if missing
@@ -3037,13 +3037,13 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
             # Save mask (_mask.jpg)
             mask_path = os.path.join(masked_dir, f"{basename}_mask.jpg")
-            cv2.imwrite(mask_path, mask_u8)
+            cv2.imwrite(mask_path, mask_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             self._embed_exif_into_jpg(mask_path, focal_mm, focal35, make, model)
 
             # (C) masked frame
             masked_bgr = self._build_masked_frame_from_bgr_and_mask(fr, mask_u8)
             masked_path = os.path.join(masked_dir, f"{basename}.jpg")
-            cv2.imwrite(masked_path, masked_bgr)
+            cv2.imwrite(masked_path, masked_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             self._embed_exif_into_jpg(masked_path, focal_mm, focal35, make, model)
 
             # progress
@@ -3126,19 +3126,19 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             
             # (A) Save original
             orig_path = os.path.join(original_dir, f"{basename}.jpg")
-            cv2.imwrite(orig_path, fr)
+            cv2.imwrite(orig_path, fr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             self._embed_exif_into_jpg(orig_path, focal_mm, focal35, make, model)
             
             # (B) Load cached mask and save
             mask_u8 = self._load_cached_mask(frames_dir, global_idx, (H, W))
             mask_path = os.path.join(masked_dir, f"{basename}_mask.jpg")
-            cv2.imwrite(mask_path, mask_u8)
+            cv2.imwrite(mask_path, mask_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             self._embed_exif_into_jpg(mask_path, focal_mm, focal35, make, model)
             
             # (C) Create and save masked frame
             masked_bgr = self._build_masked_frame_from_bgr_and_mask(fr, mask_u8)
             masked_path = os.path.join(masked_dir, f"{basename}.jpg")
-            cv2.imwrite(masked_path, masked_bgr)
+            cv2.imwrite(masked_path, masked_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             self._embed_exif_into_jpg(masked_path, focal_mm, focal35, make, model)
             
             # Update progress counter thread-safely (but don't update UI from worker thread)
