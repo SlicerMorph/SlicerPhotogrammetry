@@ -92,6 +92,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
     SETTINGS_CKPT_PATH = f"{SETTINGS_KEY}/ckptPath"
     SETTINGS_DEVICE = f"{SETTINGS_KEY}/device"
     SETTINGS_BBOX = f"{SETTINGS_KEY}/bbox_xywh"  # "x,y,w,h" (in ORIGINAL/orientation coords)
+    SETTINGS_OUTPUT_FORMAT = f"{SETTINGS_KEY}/outputFormat"  # "jpg" or "png"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -112,6 +113,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         # UI handles
         self.finalizeROIBtn = None
+        self.outputFormatCombo = None
 
         # Early log buffering before logEdit exists
         self._earlyLogs = []
@@ -303,13 +305,6 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 self.logEdit.appendPlainText(f"[{ts}] {msg}")
             self._earlyLogs = []
 
-        note = qt.QLabel(
-            "<i>GPU setup:</i> Configure installs a <b>cu126</b> build of PyTorch via <b>PyTorchUtils</b>, "
-            "clones the SAMURAI repo, installs <b>sam2</b> (editable) and dependencies, and runs the checkpoint script if present."
-        )
-        note.wordWrap = True
-        form.addRow(note)
-
         self.configureBtn.clicked.connect(self.onConfigureClicked)
         self.verifyBtn.clicked.connect(self.onVerifyClicked)
         self.openFolderBtn.clicked.connect(self.onOpenFolderClicked)
@@ -345,6 +340,38 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.framesDirEdit = qt.QLineEdit()
         self.framesDirEdit.readOnly = True
         vform.addRow("Frames folder:", self.framesDirEdit)
+
+        # Output format selection (moved above Process Video button)
+        formatRow = qt.QHBoxLayout()
+        formatLabel = qt.QLabel("Output format:")
+        self.outputFormatCombo = qt.QComboBox()
+        self.outputFormatCombo.addItem("JPG (fastest, quality=100)")
+        self.outputFormatCombo.addItem("PNG compressed (slower, lossless)")
+        self.outputFormatCombo.addItem("PNG uncompressed (fastest I/O, large files)")
+        self.outputFormatCombo.setToolTip(
+            "JPG: Fastest overall, smallest files, maximum quality (100).\n"
+            "PNG compressed: Slower I/O, moderate file sizes, lossless with compression.\n"
+            "PNG uncompressed: Fastest I/O (no compression), largest files, lossless.\n"
+            "Applies to extracted frames, masks, and all saved outputs."
+        )
+        formatRow.addWidget(formatLabel)
+        formatRow.addWidget(self.outputFormatCombo, 1)
+        vform.addRow(formatRow)
+        
+        # Restore saved format preference
+        if s.contains(self.SETTINGS_OUTPUT_FORMAT):
+            saved_format = s.value(self.SETTINGS_OUTPUT_FORMAT)
+            if saved_format == "png":
+                self.outputFormatCombo.setCurrentIndex(1)  # PNG compressed
+            elif saved_format == "png_uncompressed":
+                self.outputFormatCombo.setCurrentIndex(2)  # PNG uncompressed
+            else:
+                self.outputFormatCombo.setCurrentIndex(0)  # JPG
+        else:
+            self.outputFormatCombo.setCurrentIndex(0)  # Default to JPG
+        
+        # Save format preference when changed
+        self.outputFormatCombo.currentIndexChanged.connect(self._onOutputFormatChanged)
 
         self.loadVideoBtn = qt.QPushButton("Process Video")
         vform.addRow(self.loadVideoBtn)
@@ -502,6 +529,34 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 return str(combo.currentText())
             except Exception:
                 return str(combo.currentText)
+    
+    def _onOutputFormatChanged(self):
+        """Save output format preference when user changes it."""
+        s = qt.QSettings()
+        idx = self.outputFormatCombo.currentIndex
+        if idx == 0:
+            s.setValue(self.SETTINGS_OUTPUT_FORMAT, "jpg")
+            self._log("Output format changed to JPG (quality=100, fastest processing)")
+        elif idx == 1:
+            s.setValue(self.SETTINGS_OUTPUT_FORMAT, "png")
+            self._log("Output format changed to PNG compressed (lossless, slower processing)")
+        else:  # idx == 2
+            s.setValue(self.SETTINGS_OUTPUT_FORMAT, "png_uncompressed")
+            self._log("Output format changed to PNG uncompressed (lossless, slowest I/O)")
+    
+    def _getOutputFormat(self) -> tuple:
+        """Get current output format settings. Returns (extension, is_png, cv2_params)."""
+        import cv2
+        if self.outputFormatCombo:
+            idx = self.outputFormatCombo.currentIndex
+            if idx == 1:
+                # PNG compressed: lossless with compression (level 1 = fastest)
+                return (".png", True, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
+            elif idx == 2:
+                # PNG uncompressed: no compression (level 0)
+                return (".png", True, [int(cv2.IMWRITE_PNG_COMPRESSION), 0])
+        # Default: JPG maximum quality (100)
+        return (".jpg", False, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
 
     # ---------- Configure: clone + deps + torch cu126 ----------
     def onOpenFolderClicked(self):
@@ -1095,13 +1150,15 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 # Split into chunks and extract only first frame
                 self._log("Video requires chunking for memory safety...")
                 self._chunk_metadata = chunker.create_chunks()
-                chunker.extract_first_frame_only(self._chunk_metadata)
+                ext, is_png, _ = self._getOutputFormat()
+                chunker.extract_first_frame_only(self._chunk_metadata, use_png=is_png)
                 self._log(f"Chunking complete. Ready for ROI setup.")
             else:
                 # Single chunk - extract all frames (existing behavior)
                 self._chunk_metadata = None
-                self._log(f"Extracting frames → {frames_dir}")
-                n = self._extract_frames_blocking(str(target_mp4), str(frames_dir))
+                ext, is_png, _ = self._getOutputFormat()
+                self._log(f"Extracting frames → {frames_dir} (format: {ext[1:]})")
+                n = self._extract_frames_blocking(str(target_mp4), str(frames_dir), use_png=is_png)
                 self._log(f"Done. Extracted {n} frames (no chunking needed).")
 
             # Save last paths
@@ -1304,56 +1361,118 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         return (True, msg)
 
     def _mov_to_mp4_blocking(self, mov_path: str, mp4_path: str):
+        """Convert MOV to MP4 using ffmpeg stream copy (lossless, no re-encoding)."""
+        # Use ffmpeg with stream copy - preserves original quality
+        ffmpeg_cmd = f'ffmpeg -y -i "{mov_path}" -c copy -movflags +faststart "{mp4_path}"'
+        
+        self._log("Converting MOV→MP4 (stream copy, no re-encoding)...")
+        
+        try:
+            # Use clean environment to avoid library conflicts
+            env = os.environ.copy()
+            env.pop('LD_LIBRARY_PATH', None)
+            
+            result = subprocess.run(
+                shlex.split(ffmpeg_cmd),
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env
+            )
+            # ffmpeg outputs progress to stderr even on success
+            if result.stderr and ('error' in result.stderr.lower() or 'failed' in result.stderr.lower()):
+                self._log(f"ffmpeg warnings:\n{result.stderr}")
+        except subprocess.CalledProcessError as e:
+            self._log(f"ffmpeg error:\n{e.stderr}")
+            raise RuntimeError(f"MOV→MP4 conversion failed: {e}")
+        
+        if not Path(mp4_path).exists():
+            raise RuntimeError(f"MP4 file not created: {mp4_path}")
+        
+        self._log("Conversion complete (lossless stream copy).")
+
+    def _extract_frames_blocking(self, video_path: str, frames_dir: str, use_png: bool = True) -> int:
+        """Extract frames using ffmpeg for maximum quality.
+        
+        Args:
+            video_path: Path to source video
+            frames_dir: Output directory
+            use_png: If True, extract as PNG (lossless). If False, use JPEG quality=100
+        
+        Returns:
+            Number of frames extracted
+        """
         import cv2
-        cap = cv2.VideoCapture(mov_path)
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open: {mov_path}")
-
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(mp4_path, fourcc, fps, (width, height))
-        if not out.isOpened():
-            cap.release()
-            raise RuntimeError(f"Could not create MP4 writer at: {mp4_path}")
-
-        frame_idx = 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            out.write(frame)
-            frame_idx += 1
-            if frame_idx % 250 == 0:
-                self._log(f"Converted {frame_idx} frames?")
-                slicer.app.processEvents()
-
-        cap.release()
-        out.release()
-
-    def _extract_frames_blocking(self, video_path: str, frames_dir: str) -> int:
-        import cv2
+        
+        # Get frame count for progress tracking
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open: {video_path}")
-
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
-        idx, wrote = 0, 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            idx += 1
-            fpath = str(Path(frames_dir) / f"frame_{idx:07d}.jpg")
-            cv2.imwrite(fpath, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
-            wrote += 1
-            if wrote % 250 == 0:
-                self._log(f"Extracted {wrote}/{total if total else '?'} frames?")
-                slicer.app.processEvents()
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
         cap.release()
-        return wrote
+        
+        # Choose output format
+        if use_png:
+            output_pattern = str(Path(frames_dir) / "frame_%07d.png")
+            quality_args = ""
+            format_desc = "PNG (lossless)"
+        else:
+            output_pattern = str(Path(frames_dir) / "frame_%07d.jpg")
+            quality_args = "-q:v 1"  # Highest quality JPEG (q:v 1 = best, equivalent to quality ~95-100)
+            format_desc = "JPEG (q:v 1, maximum quality)"
+        
+        # Build ffmpeg command
+        ffmpeg_cmd = f'ffmpeg -y -i "{video_path}" {quality_args} "{output_pattern}"'.strip()
+        
+        self._log(f"Extracting frames as {format_desc}...")
+        
+        try:
+            # Use clean environment
+            env = os.environ.copy()
+            env.pop('LD_LIBRARY_PATH', None)
+            
+            # Run extraction with progress monitoring
+            process = subprocess.Popen(
+                shlex.split(ffmpeg_cmd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env
+            )
+            
+            # Monitor stderr for progress (ffmpeg outputs to stderr)
+            last_log = 0
+            for line in process.stderr:
+                if 'frame=' in line:
+                    # Parse frame number from ffmpeg output
+                    try:
+                        parts = line.split('frame=')
+                        if len(parts) > 1:
+                            frame_num = int(parts[1].split()[0])
+                            if frame_num - last_log >= 250:
+                                self._log(f"Extracted {frame_num}/{total_frames if total_frames else '?'} frames…")
+                                slicer.app.processEvents()
+                                last_log = frame_num
+                    except:
+                        pass
+            
+            process.wait()
+            if process.returncode != 0:
+                stderr = process.stderr.read() if process.stderr else ""
+                raise RuntimeError(f"Frame extraction failed (exit code {process.returncode}): {stderr}")
+                
+        except subprocess.CalledProcessError as e:
+            self._log(f"ffmpeg error:\n{e.stderr}")
+            raise RuntimeError(f"Frame extraction failed: {e}")
+        
+        # Count extracted frames
+        pattern = "*.png" if use_png else "*.jpg"
+        extracted = list(Path(frames_dir).glob(pattern))
+        count = len(extracted)
+        
+        if count == 0:
+            raise RuntimeError(f"No frames extracted to {frames_dir}")
+        
+        self._log(f"Extraction complete: {count} frames as {format_desc}")
+        return count
 
     def _safe_empty_dir(self, path: Path):
         if not path.exists():
@@ -1795,7 +1914,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                     predictor = self._build_samurai_predictor(ckpt, device)
                     
                     # 2. Extract frames for this chunk only
-                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    ext, is_png, _ = self._getOutputFormat()
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir, use_png=is_png)
                     
                     # 3. Run SAM tracking on chunk with mask propagation from previous chunk
                     # First chunk uses bbox, subsequent chunks use mask from previous chunk
@@ -1881,7 +2001,10 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                     if self.framesBuffer is not None:
                         n_frames = len(self.framesBuffer)
                     else:
-                        n_frames = len([p for p in Path(frames_dir).glob("*.jpg")])
+                        # Check for frames in either format
+                        png_frames = list(Path(frames_dir).glob("*.png"))
+                        jpg_frames = list(Path(frames_dir).glob("*.jpg"))
+                        n_frames = len(png_frames + jpg_frames)
                 except Exception:
                     pass
                 if n_frames <= 0:
@@ -1950,13 +2073,13 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 mem_masks[fid] = (agg * 255).astype("uint8")
         return mem_masks
 
-    def _save_png_mask(self, path, mask_uint8):
+    def _save_mask_with_format(self, path, mask_uint8, cv2_params):
+        """Save mask with specified format and quality parameters."""
         try:
-            from PIL import Image
-            Image.fromarray(mask_uint8, mode="L").save(path, quality=100)
-        except Exception:
             import cv2
-            cv2.imwrite(path, mask_uint8, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            cv2.imwrite(path, mask_uint8, cv2_params)
+        except Exception as e:
+            self._log(f"WARNING: Failed to save mask {path}: {e}")
     
     def _save_masks_to_cache(self, frames_dir):
         """Save masks to disk cache for fast reload."""
@@ -1967,14 +2090,15 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             import cv2
             from pathlib import Path
             
+            ext, _, cv2_params = self._getOutputFormat()
             masks_dir = Path(frames_dir) / "cached_masks"
             masks_dir.mkdir(parents=True, exist_ok=True)
             
-            self._log(f"Caching {len(self.masksBuffer)} masks to disk...")
+            self._log(f"Caching {len(self.masksBuffer)} masks to disk (format: {ext[1:]})...")
             
             for frame_idx, mask_array in self.masksBuffer.items():
-                mask_path = masks_dir / f"mask_{frame_idx:06d}.png"
-                cv2.imwrite(str(mask_path), mask_array, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+                mask_path = masks_dir / f"mask_{frame_idx:06d}{ext}"
+                cv2.imwrite(str(mask_path), mask_array, cv2_params)
             
             self._log(f"Masks cached to {masks_dir}")
         except Exception as e:
@@ -1986,7 +2110,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             import cv2
             from pathlib import Path
             
-            mask_files = sorted(masks_dir.glob("mask_*.png"))
+            # Try both formats (user may have changed preference)
+            mask_files = sorted(list(masks_dir.glob("mask_*.png")) + list(masks_dir.glob("mask_*.jpg")))
             if len(mask_files) != expected_count:
                 self._log(f"Mask cache incomplete: found {len(mask_files)}, expected {expected_count}")
                 return False
@@ -1995,7 +2120,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             
             loaded_masks = {}
             for mask_path in mask_files:
-                # Extract frame index from filename (mask_000123.png -> 123)
+                # Extract frame index from filename (mask_000123.ext -> 123)
                 frame_idx = int(mask_path.stem.split('_')[1])
                 mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
                 if mask is None:
@@ -2427,7 +2552,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                     
                     # Load this chunk's frames
                     chunker = VideoChunker(None, frames_dir, logger=self._log)
-                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    ext, is_png, _ = self._getOutputFormat()
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir, use_png=is_png)
                     chunk_frames = self._load_frames_from_folder(chunk_frames_dir)
                     
                     # Build masked frames for this chunk
@@ -2510,7 +2636,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                         raise RuntimeError("VideoChunker not available")
                     
                     chunker = VideoChunker(None, frames_dir, logger=self._log)
-                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    ext, is_png, _ = self._getOutputFormat()
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir, use_png=is_png)
                     chunk_frames = self._load_frames_from_folder(chunk_frames_dir)
                     self.framesBuffer.extend(chunk_frames)
                     chunker.cleanup_chunk_frames(chunk_frames_dir)
@@ -2761,6 +2888,45 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         if not save_root or not os.path.isdir(save_root):
             slicer.util.messageBox("Please pick a valid folder to save into.")
             return
+        
+        # Check if output folders already contain data
+        # Note: We check parent folders (original/ and masked/), not Set1 subdirectories
+        original_parent = os.path.join(save_root, "original")
+        masked_parent = os.path.join(save_root, "masked")
+        
+        existing_files = []
+        if os.path.isdir(original_parent):
+            for root, dirs, files in os.walk(original_parent):
+                existing_files.extend([f for f in files if f.endswith(('.png', '.jpg', '.jpeg'))])
+        if os.path.isdir(masked_parent):
+            for root, dirs, files in os.walk(masked_parent):
+                existing_files.extend([f for f in files if f.endswith(('.png', '.jpg', '.jpeg'))])
+        
+        if existing_files:
+            num_existing = len(existing_files)
+            proceed = slicer.util.confirmYesNoDisplay(
+                f"The output folder already contains {num_existing} image files from a previous save.\n\n"
+                f"These files will be DELETED before saving new data.\n\n"
+                f"Do you want to proceed?\n\n"
+                f"(Click 'No' to manually move the existing data first)",
+                "Overwrite Existing Data?"
+            )
+            if not proceed:
+                self._log("Save cancelled by user - existing data preserved.")
+                return
+            
+            # User confirmed - delete existing output parent folders (original/ and masked/)
+            import shutil
+            try:
+                if os.path.isdir(original_parent):
+                    shutil.rmtree(original_parent)
+                    self._log(f"Deleted existing original folder: {original_parent}")
+                if os.path.isdir(masked_parent):
+                    shutil.rmtree(masked_parent)
+                    self._log(f"Deleted existing masked folder: {masked_parent}")
+            except Exception as e:
+                slicer.util.errorDisplay(f"Failed to delete existing data:\n{e}")
+                return
 
         # Pick source frames + indices
         if isinstance(self.keyFrameIndices, list) and self.keyFrameIndices and isinstance(self.keyFramesBuffer, list):
@@ -2785,11 +2951,14 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 frame_dict = {}
                 for chunk_idx in sorted(frames_by_chunk.keys()):
                     chunk_info = self._chunk_metadata[chunk_idx]
-                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
+                    ext, is_png, _ = self._getOutputFormat()
+                    chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir, use_png=is_png)
                     
                     for global_idx, local_idx in frames_by_chunk[chunk_idx]:
                         # ffmpeg numbers frames starting from 1, not 0
-                        frame_path = chunk_frames_dir / f"{local_idx + 1:06d}.jpg"
+                        # Try both formats (user may have changed format preference)
+                        ext, _, _ = self._getOutputFormat()
+                        frame_path = chunk_frames_dir / f"{local_idx + 1:06d}{ext}"
                         import cv2
                         frame = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
                         if frame is not None:
@@ -2797,7 +2966,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                         else:
                             self._log(f"Warning: Failed to load {frame_path}")
                     
-                    chunker.cleanup_chunk_frames(chunk_frames_dir)
+                    # Don't cleanup - frames will be reused for saving (cleanup happens after save)
                 
                 # Build frames list in correct order (filter out any that failed to load)
                 loaded_indices = [idx for idx in self.keyFrameIndices if idx in frame_dict]
@@ -2943,14 +3112,17 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             pass
         return focal_mm, focal35, make, model
 
-    def _embed_exif_into_jpg(self, jpg_path: str, focal_mm, focal35, make="Apple", model="iPhone"):
+    def _embed_exif_into_jpg(self, img_path: str, focal_mm, focal35, make="Apple", model="iPhone"):
         """
         Inject minimal EXIF so downstream photogrammetry tools see sane camera info.
+        For PNG: inserts EXIF as metadata without re-encoding (fast).
+        For JPEG: re-saves with EXIF (unavoidable but already compressed).
         """
         try:
             from PIL import Image
             import piexif
-            img = Image.open(jpg_path)
+            
+            # Build EXIF data
             exif = {"0th": {}, "Exif": {}, "1st": {}, "thumbnail": None, "GPS": {}}
             if make:
                 exif["0th"][piexif.ImageIFD.Make] = str(make)
@@ -2960,9 +3132,18 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 exif["Exif"][piexif.ExifIFD.FocalLength] = (int(float(focal_mm) * 100), 100)
             if focal35 is not None:
                 exif["Exif"][piexif.ExifIFD.FocalLengthIn35mmFilm] = int(focal35)
-            img.save(jpg_path, exif=piexif.dump(exif))
+            
+            exif_bytes = piexif.dump(exif)
+            
+            # For PNG files, insert EXIF as metadata without re-encoding
+            if img_path.lower().endswith('.png'):
+                piexif.insert(exif_bytes, img_path)
+            else:
+                # For JPEG, need to re-save (unavoidable)
+                img = Image.open(img_path)
+                img.save(img_path, exif=exif_bytes)
         except Exception:
-            # Non-fatal if EXIF injection fails?files are still written
+            # Non-fatal if EXIF injection fails—files are still written
             pass
 
     def _build_masked_frame_from_bgr_and_mask(self, frame_bgr, mask_uint8):
@@ -2991,10 +3172,11 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         """
         Save images according to your spec:
           - save_root_dir/
-                original/Set1/   -> original frames  (videoStem_index.jpg)
-                masked/Set1/     -> masked frames    (videoStem_index.jpg)
-                                    binary masks     (videoStem_index_mask.jpg)
-        EXIF is embedded on every JPEG.
+                original/Set1/   -> original frames  (videoStem_index.ext)
+                masked/Set1/     -> masked frames    (videoStem_index.ext)
+                                    binary masks     (videoStem_index_mask.ext)
+        where ext is .jpg or .png based on user's format selection.
+        EXIF is embedded on every image file.
         
         If frames is None, this signals on-demand processing for chunked videos.
         """
@@ -3025,25 +3207,26 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         for i, fr in enumerate(frames):
             idx = frame_indices[i] if i < len(frame_indices) else i
             basename = f"{stem}_{idx:06d}"
+            ext, _, cv2_params = self._getOutputFormat()
 
             # (A) original
-            orig_path = os.path.join(original_dir, f"{basename}.jpg")
-            cv2.imwrite(orig_path, fr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            orig_path = os.path.join(original_dir, f"{basename}{ext}")
+            cv2.imwrite(orig_path, fr, cv2_params)
             self._embed_exif_into_jpg(orig_path, focal_mm, focal35, make, model)
 
             # (B) mask (uint8 0/255) – derive from in-memory dict; fall back to zeros if missing
             H, W = fr.shape[:2]
             mask_u8 = self._extract_mask_uint8(all_masks.get(idx), (H, W))
 
-            # Save mask (_mask.jpg)
-            mask_path = os.path.join(masked_dir, f"{basename}_mask.jpg")
-            cv2.imwrite(mask_path, mask_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            # Save mask (_mask{ext})
+            mask_path = os.path.join(masked_dir, f"{basename}_mask{ext}")
+            cv2.imwrite(mask_path, mask_u8, cv2_params)
             self._embed_exif_into_jpg(mask_path, focal_mm, focal35, make, model)
 
             # (C) masked frame
             masked_bgr = self._build_masked_frame_from_bgr_and_mask(fr, mask_u8)
-            masked_path = os.path.join(masked_dir, f"{basename}.jpg")
-            cv2.imwrite(masked_path, masked_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            masked_path = os.path.join(masked_dir, f"{basename}{ext}")
+            cv2.imwrite(masked_path, masked_bgr, cv2_params)
             self._embed_exif_into_jpg(masked_path, focal_mm, focal35, make, model)
 
             # progress
@@ -3110,7 +3293,10 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         processed_lock = threading.Lock()
         processed_count = [0]  # Use list for mutability in closure
         
-        self._log(f"Processing {len(self._chunk_metadata)} chunks on-demand with 4-thread parallel I/O...")
+        # Use more threads to compensate for single-threaded image encoding
+        # Each thread does 3 image writes (original, mask, masked)
+        num_workers = 12
+        self._log(f"Processing {len(self._chunk_metadata)} chunks on-demand with {num_workers}-thread parallel I/O...")
         
         def process_frame(frame_file, global_idx):
             """Process a single frame: load, mask, save all outputs."""
@@ -3123,22 +3309,23 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             
             basename = f"{stem}_{global_idx:06d}"
             H, W = fr.shape[:2]
+            ext, _, cv2_params = self._getOutputFormat()
             
             # (A) Save original
-            orig_path = os.path.join(original_dir, f"{basename}.jpg")
-            cv2.imwrite(orig_path, fr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            orig_path = os.path.join(original_dir, f"{basename}{ext}")
+            cv2.imwrite(orig_path, fr, cv2_params)
             self._embed_exif_into_jpg(orig_path, focal_mm, focal35, make, model)
             
             # (B) Load cached mask and save
             mask_u8 = self._load_cached_mask(frames_dir, global_idx, (H, W))
-            mask_path = os.path.join(masked_dir, f"{basename}_mask.jpg")
-            cv2.imwrite(mask_path, mask_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            mask_path = os.path.join(masked_dir, f"{basename}_mask{ext}")
+            cv2.imwrite(mask_path, mask_u8, cv2_params)
             self._embed_exif_into_jpg(mask_path, focal_mm, focal35, make, model)
             
             # (C) Create and save masked frame
             masked_bgr = self._build_masked_frame_from_bgr_and_mask(fr, mask_u8)
-            masked_path = os.path.join(masked_dir, f"{basename}.jpg")
-            cv2.imwrite(masked_path, masked_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            masked_path = os.path.join(masked_dir, f"{basename}{ext}")
+            cv2.imwrite(masked_path, masked_bgr, cv2_params)
             self._embed_exif_into_jpg(masked_path, focal_mm, focal35, make, model)
             
             # Update progress counter thread-safely (but don't update UI from worker thread)
@@ -3147,14 +3334,16 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             
             return True
         
-        # Process chunks with parallel I/O (4 threads)
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # Process chunks with parallel I/O (12 threads for faster encoding)
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
             for chunk_idx, chunk_info in enumerate(self._chunk_metadata):
                 self._log(f"Processing chunk {chunk_idx+1}/{len(self._chunk_metadata)}...")
                 
                 # Extract frames for this chunk
-                chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir)
-                frame_files = sorted(chunk_frames_dir.glob("*.jpg"))
+                ext, is_png, _ = self._getOutputFormat()
+                chunk_frames_dir = chunker.extract_chunk_frames(chunk_info, frames_dir, use_png=is_png)
+                # Support both formats
+                frame_files = sorted(list(chunk_frames_dir.glob("*.png")) + list(chunk_frames_dir.glob("*.jpg")))
                 
                 # Prepare tasks for frames in this chunk
                 tasks = []
@@ -3206,12 +3395,14 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         
         H, W = shape_hw
         
-        # Try loading from cache first
-        mask_path = Path(frames_dir) / "cached_masks" / f"mask_{frame_idx:06d}.png"
-        if mask_path.exists():
-            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-            if mask is not None:
-                return mask
+        # Try loading from cache (check both formats)
+        masks_cache_dir = Path(frames_dir) / "cached_masks"
+        for ext in [".png", ".jpg"]:
+            mask_path = masks_cache_dir / f"mask_{frame_idx:06d}{ext}"
+            if mask_path.exists():
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is not None:
+                    return mask
         
         # Fallback: extract from masksBuffer (should already be cached though)
         if hasattr(self, 'masksBuffer') and self.masksBuffer:

@@ -218,12 +218,13 @@ class VideoChunker:
         self._log(f"Created {len(metadata)} chunks (total {current_frame} frames)")
         return metadata
     
-    def extract_first_frame_only(self, chunk_metadata):
+    def extract_first_frame_only(self, chunk_metadata, use_png=True):
         """
         Extract only the first frame from the first chunk for ROI setup.
         
         Args:
             chunk_metadata: List of chunk metadata dicts (from create_chunks)
+            use_png: If True, extract as PNG (lossless). If False, use JPEG quality=100
             
         Returns:
             Path: Directory containing the single first frame
@@ -235,11 +236,19 @@ class VideoChunker:
         first_frame_dir = self.output_dir / "first_frame_only"
         first_frame_dir.mkdir(parents=True, exist_ok=True)
         
-        # Extract frame 1 as 000001.jpg (to match frame numbering convention)
-        output_path = first_frame_dir / "000001.jpg"
-        ffmpeg_cmd = f'ffmpeg -y -i "{first_chunk_path}" -vframes 1 -q:v 2 "{output_path}"'
+        # Choose format and quality
+        if use_png:
+            output_path = first_frame_dir / "000001.png"
+            quality_args = ""
+        else:
+            output_path = first_frame_dir / "000001.jpg"
+            quality_args = "-q:v 1"  # Best quality (equivalent to ~95-100)
         
-        self._log(f"Extracting first frame for ROI setup...")
+        # Extract frame 1 (match frame numbering convention)
+        ffmpeg_cmd = f'ffmpeg -y -i "{first_chunk_path}" -vframes 1 {quality_args} "{output_path}"'.strip()
+        
+        format_desc = "PNG (lossless)" if use_png else "JPEG (q:v 1, maximum quality)"
+        self._log(f"Extracting first frame for ROI setup as {format_desc}...")
         
         try:
             # Use clean environment to avoid library conflicts
@@ -262,13 +271,14 @@ class VideoChunker:
         self._log(f"First frame ready: {output_path}")
         return first_frame_dir
     
-    def extract_chunk_frames(self, chunk_info, output_dir):
+    def extract_chunk_frames(self, chunk_info, output_dir, use_png=True):
         """
         Extract frames for a specific chunk on-demand.
         
         Args:
             chunk_info: Single chunk metadata dict
             output_dir: Base output directory
+            use_png: If True, extract as PNG (lossless). If False, use JPEG quality=100
             
         Returns:
             Path: Directory containing extracted frames for this chunk
@@ -279,11 +289,28 @@ class VideoChunker:
         chunk_frames_dir = Path(output_dir) / f"chunk_{chunk_idx:03d}_frames"
         chunk_frames_dir.mkdir(parents=True, exist_ok=True)
         
-        # Extract frames with sequential numbering starting from 1
-        output_pattern = chunk_frames_dir / "%06d.jpg"
-        ffmpeg_cmd = f'ffmpeg -y -i "{chunk_path}" -q:v 2 "{output_pattern}"'
+        # Choose format and quality
+        if use_png:
+            output_pattern = chunk_frames_dir / "%06d.png"
+            quality_args = ""
+            format_desc = "PNG (lossless)"
+            pattern = "*.png"
+        else:
+            output_pattern = chunk_frames_dir / "%06d.jpg"
+            quality_args = "-q:v 1"  # Best quality (equivalent to ~95-100)
+            format_desc = "JPEG (q:v 1, maximum quality)"
+            pattern = "*.jpg"
         
-        self._log(f"Extracting frames for chunk {chunk_idx}...")
+        # Check if frames already exist (skip re-extraction for performance)
+        existing_frames = list(chunk_frames_dir.glob(pattern))
+        if existing_frames:
+            self._log(f"Using existing {len(existing_frames)} frames for chunk {chunk_idx}")
+            return chunk_frames_dir
+        
+        # Extract frames with sequential numbering starting from 1
+        ffmpeg_cmd = f'ffmpeg -y -i "{chunk_path}" {quality_args} "{output_pattern}"'.strip()
+        
+        self._log(f"Extracting frames for chunk {chunk_idx} as {format_desc}...")
         
         try:
             # Use clean environment to avoid library conflicts
@@ -301,7 +328,8 @@ class VideoChunker:
             raise RuntimeError(f"Chunk frame extraction failed: {e.stderr}")
         
         # Verify frames were created
-        frame_files = list(chunk_frames_dir.glob("*.jpg"))
+        pattern = "*.png" if use_png else "*.jpg"
+        frame_files = list(chunk_frames_dir.glob(pattern))
         if not frame_files:
             raise RuntimeError(f"No frames extracted to {chunk_frames_dir}")
         
