@@ -80,7 +80,7 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         # WebODM parameter levels
         self.factorLevels = {
             "ignore-gsd": [False, True],
-            "matcher-neighbors": [16, 0, 8, 12, 24],
+            "matcher-neighbors": [16, 0, 8, 10, 12, 24],
             "mesh-octree-depth": [12, 13, 14],
             "mesh-size": [300000, 500000, 750000, 1000000],
             "min-num-features": [50000, 10000, 20000],
@@ -453,7 +453,9 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         imageExtensions = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".JPG", ".JPEG", ".PNG")
         allImages = []
         for filename in os.listdir(inputFolder):
-            if filename.endswith(imageExtensions) and not filename.endswith("_mask.jpg"):
+            lower_fn = filename.lower()
+            # Exclude mask files (case-insensitive)
+            if filename.endswith(imageExtensions) and not lower_fn.endswith("_mask.jpg") and not lower_fn.endswith("_mask.jpeg") and not lower_fn.endswith("_mask.png"):
                 allImages.append(os.path.join(inputFolder, filename))
         
         if len(allImages) == 0:
@@ -729,25 +731,27 @@ class ODMManager:
             slicer.util.errorDisplay("Input folder is invalid. Please select a folder containing masked images.")
             return
 
-        # Collect masked images and mask files
-        all_masked_color_jpgs = []
-        all_mask_jpgs = []
+        # Collect masked images and mask files (JPG and PNG)
+        all_masked_color_images = []
+        all_mask_images = []
         for root, dirs, files in os.walk(inputFolder):
             for fn in files:
                 lower_fn = fn.lower()
-                if lower_fn.endswith(".jpg") and not lower_fn.endswith("_mask.jpg"):
-                    all_masked_color_jpgs.append(os.path.join(root, fn))
-                elif lower_fn.endswith("_mask.jpg"):
-                    all_mask_jpgs.append(os.path.join(root, fn))
+                # Check for color images (JPG/JPEG or PNG, but not masks)
+                if (lower_fn.endswith(".jpg") or lower_fn.endswith(".jpeg") or lower_fn.endswith(".png")) and not lower_fn.endswith("_mask.jpg") and not lower_fn.endswith("_mask.jpeg") and not lower_fn.endswith("_mask.png"):
+                    all_masked_color_images.append(os.path.join(root, fn))
+                # Check for mask images (JPG/JPEG or PNG)
+                elif lower_fn.endswith("_mask.jpg") or lower_fn.endswith("_mask.jpeg") or lower_fn.endswith("_mask.png"):
+                    all_mask_images.append(os.path.join(root, fn))
 
-        all_jpgs = all_masked_color_jpgs + all_mask_jpgs
-        if len(all_jpgs) == 0:
-            slicer.util.warningDisplay("No masked .jpg images found in input folder.")
+        all_images = all_masked_color_images + all_mask_images
+        if len(all_images) == 0:
+            slicer.util.warningDisplay("No masked images (JPG/JPEG or PNG) found in input folder.")
             return
 
         # Check for combined GCP file
         combinedGCP = os.path.join(inputFolder, "combined_gcp_list.txt")
-        files_to_upload = all_jpgs[:]
+        files_to_upload = all_images[:]
         if os.path.isfile(combinedGCP):
             files_to_upload.append(combinedGCP)
         else:
