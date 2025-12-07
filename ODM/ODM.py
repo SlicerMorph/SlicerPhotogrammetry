@@ -279,12 +279,16 @@ class ODMWidget(ScriptedLoadableModuleWidget):
             self.factorComboBoxes[factorName] = combo
             webodmTaskFormLayout.addRow(f"{factorName}:", combo)
         
-        # Max concurrency
+        # Max concurrency - default to number of CPUs minus 1
+        cpu_count = os.cpu_count() or 16
+        default_concurrency = max(1, cpu_count - 1)
+        
         self.maxConcurrencySpinBox = qt.QSpinBox()
-        self.maxConcurrencySpinBox.setRange(16, 256)
-        self.maxConcurrencySpinBox.setValue(16)
+        self.maxConcurrencySpinBox.setRange(1, 256)
+        self.maxConcurrencySpinBox.setValue(default_concurrency)
         self.maxConcurrencySpinBox.setToolTip(
-            "Maximum number of processes used by WebODM.\n"
+            f"Maximum number of processes used by WebODM.\n"
+            f"Default: {default_concurrency} (system CPUs - 1).\n"
             "Higher values = faster but more memory usage."
         )
         webodmTaskFormLayout.addRow("max-concurrency:", self.maxConcurrencySpinBox)
