@@ -22,8 +22,10 @@ include(${Slicer_USE_FILE})
 
 #-----------------------------------------------------------------------------
 # Extension modules
-add_subdirectory(Photogrammetry)
+add_subdirectory(PhotoMasking)
 add_subdirectory(ClusterPhotos)
+add_subdirectory(VideoMasking)
+add_subdirectory(ODM)
 
 ## NEXT_MODULE
 

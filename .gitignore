@@ -1,0 +1,28 @@
+# Python compiled files
+*.pyc
+
+# Compressed archives
+*.zip
+*.gz
+
+# Python cache directories
+__pycache__/
+
+# WebODM
+WebODM/
+
+# SAM related files
+sam*
+Sam*
+
+# Model weight files
+*.pt
+*.pth
+*.ptz
+*.ckpt
+*.pkl
+*.pb
+*.onnx
+*.h5
+*.weights
+*.caffemodel
