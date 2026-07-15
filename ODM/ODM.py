@@ -905,6 +905,9 @@ class ODMManager:
             progressDialog.setValue(int(percent))
             slicer.app.processEvents()
 
+        # Report the error only after the progress dialog is down: errorDisplay is modal,
+        # so raising it from the except block would strand the upload dialog behind it.
+        createError = None
         try:
             self.webodmTask = node.create_task(
                 files=files_to_upload,
@@ -913,10 +916,14 @@ class ODMManager:
                 progress_callback=onUploadProgress
             )
         except Exception as e:
-            slicer.util.errorDisplay(f"Task creation failed:\n{str(e)}")
-            return
+            createError = e
         finally:
             progressDialog.close()
+            slicer.app.processEvents()
+
+        if createError is not None:
+            slicer.util.errorDisplay(f"Task creation failed:\n{str(createError)}")
+            return
 
         slicer.util.infoDisplay(
             f"Task '{shortTaskName}' created successfully. Monitoring progress...",
