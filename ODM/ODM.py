@@ -58,6 +58,7 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.webodmLogTextEdit = None
         self.stopMonitoringButton = None
         self.cancelTaskButton = None
+        self.reconnectTaskButton = None
         self.nodeDashboardLabel = None
         
         # NodeODM management
@@ -338,6 +339,16 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.cancelTaskButton.setToolTip("Cancel the monitored task on the node itself.")
         taskControlRow.addWidget(self.cancelTaskButton)
         webodmTaskFormLayout.addRow(taskControlRow)
+
+        self.reconnectTaskButton = qt.QPushButton("Reconnect to Task on Node...")
+        self.reconnectTaskButton.setToolTip(
+            "Pick up a task that is already on the node - one left behind by 'Stop Monitoring',\n"
+            "or started in an earlier Slicer session - and resume watching it, downloading the\n"
+            "results when it finishes.\n\n"
+            "NodeODM deletes finished tasks after 48 hours by default, so this only reaches\n"
+            "tasks the node still remembers."
+        )
+        webodmTaskFormLayout.addRow(self.reconnectTaskButton)
         
         self.importModelButton = qt.QPushButton("Import Reconstructed Model")
         self.layout.addWidget(self.importModelButton)
@@ -368,6 +379,7 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.launchWebODMTaskButton.connect('clicked(bool)', self.onRunWebODMTask)
         self.stopMonitoringButton.connect('clicked(bool)', self.onStopMonitoring)
         self.cancelTaskButton.connect('clicked(bool)', self.onCancelTaskClicked)
+        self.reconnectTaskButton.connect('clicked(bool)', self.onReconnectTaskClicked)
         self.importModelButton.connect('clicked(bool)', self.onImportModelClicked)
         # self.saveTaskButton.connect('clicked(bool)', self.onSaveTaskClicked)
         # self.restoreTaskButton.connect('clicked(bool)', self.onRestoreTaskClicked)
@@ -443,6 +455,10 @@ class ODMWidget(ScriptedLoadableModuleWidget):
     def onCancelTaskClicked(self):
         """Cancel the monitored task on the node"""
         self.webODMManager.onCancelTaskClicked()
+
+    def onReconnectTaskClicked(self):
+        """Resume monitoring a task that is already on the node"""
+        self.webODMManager.onReconnectTaskClicked()
 
     def nodeDashboardUrl(self):
         """URL of the NodeODM dashboard for the currently configured node."""
@@ -765,6 +781,7 @@ class ODMManager:
         """
         hasTask = self.webodmTask is not None
         self.widget.launchWebODMTaskButton.setEnabled(not hasTask)
+        self.widget.reconnectTaskButton.setEnabled(not hasTask)
         self.widget.stopMonitoringButton.setEnabled(hasTask)
         self.widget.cancelTaskButton.setEnabled(hasTask)
 
@@ -1022,6 +1039,114 @@ class ODMManager:
         self._stopMonitoringTimer()
         self.webodmTask = None
         self._updateTaskButtons()
+
+    def describeTask(self, info):
+        """One line per task for the reconnect picker."""
+        stamp = info.date_created.strftime("%Y-%m-%d %H:%M") if info.date_created else "?"
+        return (f"{info.name or '(unnamed)'}  |  {info.status.name}  |  "
+                f"{stamp} UTC  |  {info.images_count} images")
+
+    def onReconnectTaskClicked(self):
+        """
+        Attach to a task that is already on the node -- left running by Stop Monitoring,
+        or started in an earlier Slicer session -- and resume monitoring it, so its
+        results can still be downloaded.
+        """
+        if self.webodmTask is not None:
+            slicer.util.warningDisplay(
+                "A task is already being monitored.\n\nUse 'Stop Monitoring' first."
+            )
+            return
+
+        inputFolder = self.widget.inputFolderSelector.directory
+        if not inputFolder or not os.path.isdir(inputFolder):
+            slicer.util.errorDisplay(
+                "Select the masked images folder first - it is where the results are downloaded to."
+            )
+            return
+
+        try:
+            from pyodm import Node
+        except ImportError:
+            slicer.util.errorDisplay("pyodm module not found. Please install it via pip.")
+            return
+
+        dashboardUrl = self.widget.nodeDashboardUrl()
+        node = Node(self.widget.nodeIPLineEdit.text.strip(), self.widget.nodePortSpinBox.value)
+
+        try:
+            entries = node.get('/task/list') or []
+        except Exception as e:
+            slicer.util.errorDisplay(
+                f"Could not reach NodeODM at {dashboardUrl}\n\n{str(e)}\n\n"
+                "Is the node running? Use 'Launch NodeODM' above to start it."
+            )
+            return
+
+        if not entries:
+            slicer.util.infoDisplay(f"The node at {dashboardUrl} has no tasks.")
+            return
+
+        # /task/list returns UUIDs only, so ask each task for its name/status/date.
+        tasks = []
+        for entry in entries:
+            uuid = entry.get('uuid') if isinstance(entry, dict) else None
+            if not uuid:
+                continue
+            try:
+                tasks.append(node.get_task(uuid).info())
+            except Exception:
+                continue  # vanished between listing and asking; skip it
+
+        if not tasks:
+            slicer.util.warningDisplay(
+                f"The node at {dashboardUrl} listed tasks, but none of them could be read."
+            )
+            return
+
+        tasks.sort(key=lambda i: i.date_created, reverse=True)
+        labels = [self.describeTask(i) for i in tasks]
+
+        # PythonQt's binding for QInputDialog.getItem returns just the selected string
+        # (empty on cancel), not the (value, ok) tuple the C++/PyQt API uses.
+        chosen = qt.QInputDialog.getItem(
+            slicer.util.mainWindow(),
+            "Reconnect to Task",
+            f"Tasks on {dashboardUrl}:",
+            labels,
+            0,
+            False,
+        )
+        if not chosen or chosen not in labels:
+            return
+
+        self.attachToTask(node, tasks[labels.index(chosen)], inputFolder, dashboardUrl)
+
+    def attachToTask(self, node, info, inputFolder, dashboardUrl):
+        """Resume monitoring an existing node task and route its results to disk."""
+        self.webodmTask = node.get_task(info.uuid)
+
+        # The task name is the folder key (WebODM_<name>), which is why names carry a
+        # timestamp. A task created outside Slicer may be unnamed; fall back to its UUID.
+        folderKey = info.name or f"task_{info.uuid[:8]}"
+        self.webodmOutDir = os.path.join(inputFolder, f"WebODM_{folderKey}")
+
+        self.widget.webodmLogTextEdit.clear()
+        self.widget.webodmLogTextEdit.append(f"Reconnected to '{folderKey}' on {dashboardUrl}")
+        self.widget.webodmLogTextEdit.append(f"  node task UUID: {info.uuid}")
+        self.widget.webodmLogTextEdit.append(f"  results will download to: {self.webodmOutDir}")
+
+        self.lastWebODMOutputLineIndex = 0
+        self._stopMonitoringTimer()
+        self.webodmTimer = qt.QTimer()
+        self.webodmTimer.setInterval(5000)
+        self.webodmTimer.timeout.connect(self.checkWebODMTaskStatus)
+        self.webodmTimer.start()
+        self._updateTaskButtons()
+
+        # Poll once now rather than making the user wait for the first tick -- and if the
+        # task already finished, this downloads it immediately.
+        self.checkWebODMTaskStatus()
 
     def queuedTaskCount(self):
         """
