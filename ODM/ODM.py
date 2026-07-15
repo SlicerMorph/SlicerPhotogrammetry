@@ -757,20 +757,43 @@ class ODMManager:
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to stop container:\n{str(e)}")
 
+    def _updateTaskButtons(self):
+        """
+        Single source of truth for the task buttons: Run is available only when no task
+        is tracked, and the task controls only when one is. Re-enabling Run while a task
+        is still tracked is what let a second click orphan the first task.
+        """
+        hasTask = self.webodmTask is not None
+        self.widget.launchWebODMTaskButton.setEnabled(not hasTask)
+        self.widget.stopMonitoringButton.setEnabled(hasTask)
+        self.widget.cancelTaskButton.setEnabled(hasTask)
+
     def onRunWebODMTask(self):
         """
         Create and execute a WebODM reconstruction task.
 
-        The button is held disabled for the whole call: the upload below runs on the UI
-        thread, and every click here queues a separate task on the node.
+        Run is disabled for the whole call (the upload runs on the UI thread, so clicks
+        would otherwise queue up behind it) and stays disabled afterwards for as long as
+        the created task is still being tracked.
         """
         self.widget.launchWebODMTaskButton.setEnabled(False)
         try:
             self._runWebODMTask()
         finally:
-            self.widget.launchWebODMTaskButton.setEnabled(True)
+            self._updateTaskButtons()
 
     def _runWebODMTask(self):
+        # Slicer tracks exactly one task. Starting another would overwrite webodmTask and
+        # webodmTimer, leaving the previous one running on the node with no way to monitor
+        # or cancel it from here.
+        if self.webodmTask is not None:
+            slicer.util.warningDisplay(
+                "A task is already being monitored.\n\n"
+                "Use 'Cancel Task' to stop it, or 'Stop Monitoring' to leave it running on "
+                "the node, before starting another one."
+            )
+            return
+
         try:
             from pyodm import Node
         except ImportError:
@@ -905,8 +928,6 @@ class ODMManager:
 
         self.widget.webodmLogTextEdit.clear()
         self.widget.webodmLogTextEdit.append(f"Task '{shortTaskName}' queued on {dashboardUrl}")
-        self.widget.stopMonitoringButton.setEnabled(True)
-        self.widget.cancelTaskButton.setEnabled(True)
 
         self.lastWebODMOutputLineIndex = 0
 
@@ -943,8 +964,7 @@ class ODMManager:
         """
         self._stopMonitoringTimer()
         self.webodmTask = None
-        self.widget.stopMonitoringButton.setEnabled(False)
-        self.widget.cancelTaskButton.setEnabled(False)
+        self._updateTaskButtons()
         self.widget.webodmLogTextEdit.append(
             "Stopped monitoring. The task is still running on the node -- see "
             f"{self.widget.nodeDashboardUrl()} to follow or cancel it."
@@ -982,13 +1002,12 @@ class ODMManager:
         self.widget.webodmLogTextEdit.append("Task canceled on the node.")
         self._stopMonitoringTimer()
         self.webodmTask = None
-        self.widget.stopMonitoringButton.setEnabled(False)
-        self.widget.cancelTaskButton.setEnabled(False)
+        self._updateTaskButtons()
 
     def queuedTaskCount(self):
         """
-        How many tasks are running or queued on the node, or None if it can't be asked.
-        Used to explain a task sitting at 'Queued, Progress: 0%'.
+        How many tasks are QUEUED or RUNNING on the node (this one included), or None if
+        it can't be asked. Used to explain a task sitting at 'Queued, Progress: 0%'.
         """
         try:
             from pyodm import Node
@@ -1019,11 +1038,13 @@ class ODMManager:
         statusLine = f"Status: {info.status.name}, Progress: {info.progress}%"
         if info.status.name.lower() == "queued":
             # "Queued, 0%" on its own reads as a hang. Say what it is waiting behind.
-            aheadCount = self.queuedTaskCount()
-            if aheadCount is not None and aheadCount > 1:
+            # NodeODM counts QUEUED+RUNNING including this task, so drop it to get the
+            # number actually ahead.
+            totalCount = self.queuedTaskCount()
+            if totalCount is not None and totalCount > 1:
                 statusLine += (
-                    f" -- {aheadCount} task(s) running or queued on this node; "
-                    f"yours is waiting its turn. See {self.widget.nodeDashboardUrl()}"
+                    f" -- {totalCount - 1} task(s) ahead of yours on this node. "
+                    f"See {self.widget.nodeDashboardUrl()}"
                 )
         self.widget.webodmLogTextEdit.append(statusLine)
         cursor = self.widget.webodmLogTextEdit.textCursor()
@@ -1043,15 +1064,13 @@ class ODMManager:
 
             self._stopMonitoringTimer()
             self.webodmTask = None
-            self.widget.stopMonitoringButton.setEnabled(False)
-            self.widget.cancelTaskButton.setEnabled(False)
+            self._updateTaskButtons()
         elif info.status.name.lower() in ["failed", "canceled"]:
             self.widget.webodmLogTextEdit.append("Task failed or canceled. Stopping.")
             slicer.app.processEvents()
             self._stopMonitoringTimer()
             self.webodmTask = None
-            self.widget.stopMonitoringButton.setEnabled(False)
-            self.widget.cancelTaskButton.setEnabled(False)
+            self._updateTaskButtons()
 
     def onImportModelClicked(self):
         """
