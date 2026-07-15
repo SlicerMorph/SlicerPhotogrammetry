@@ -930,11 +930,16 @@ class ODMManager:
             autoCloseMsec=3000
         )
 
+        # Path only -- the folder is created at download time. Creating it here left an
+        # empty WebODM_<name> folder behind whenever a task was never downloaded (Stop
+        # Monitoring, a failure, a Slicer restart), which then looked like output and
+        # sent 'Import Reconstructed Model' hunting for an odm_texturing that never came.
         self.webodmOutDir = os.path.join(inputFolder, f"WebODM_{shortTaskName}")
-        os.makedirs(self.webodmOutDir, exist_ok=True)
 
         self.widget.webodmLogTextEdit.clear()
         self.widget.webodmLogTextEdit.append(f"Task '{shortTaskName}' queued on {dashboardUrl}")
+        self.widget.webodmLogTextEdit.append(f"  node task UUID: {self.webodmTask.uuid}")
+        self.widget.webodmLogTextEdit.append(f"  results will download to: {self.webodmOutDir}")
 
         self.lastWebODMOutputLineIndex = 0
 
@@ -953,17 +958,24 @@ class ODMManager:
     
     def generateShortTaskName(self, basePrefix, paramsDict):
         """
-        Generate a short task name based on prefix and parameter hash.
-        Similar to PhotoMasking's generateShortTaskName method.
+        Name a task uniquely: prefix, a hash of the parameters, and the start time.
+
+        The hash alone is a pure function of the parameters, so re-running the same
+        settings produced the same name every time -- two tasks on the node sharing one
+        name, both pointing at one WebODM_<name> folder, the second download landing on
+        top of the first. The timestamp is what makes a run identifiable; the hash is
+        kept so the settings are still readable at a glance.
         """
         import hashlib
         import json
-        
+        import datetime
+
         # Convert params to a stable JSON string
         paramsStr = json.dumps(paramsDict, sort_keys=True)
         hashObj = hashlib.sha256(paramsStr.encode('utf-8'))
         shortHash = hashObj.hexdigest()[:8]
-        return f"{basePrefix}_{shortHash}"
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        return f"{basePrefix}_{shortHash}_{stamp}"
 
     def onStopMonitoring(self):
         """
@@ -1064,6 +1076,7 @@ class ODMManager:
             self.widget.webodmLogTextEdit.append(f"Task completed! Downloading results to {self.webodmOutDir} ...")
             slicer.app.processEvents()
             try:
+                os.makedirs(self.webodmOutDir, exist_ok=True)
                 self.webodmTask.download_assets(self.webodmOutDir)
                 slicer.util.infoDisplay(f"Results downloaded to:\n{self.webodmOutDir}")
             except Exception as e:
@@ -1088,13 +1101,15 @@ class ODMManager:
             slicer.util.errorDisplay("No input folder selected.")
             return
 
-        # Search for WebODM output folders
-        webodm_dirs = [d for d in os.listdir(inputFolder) if d.startswith("WebODM_")]
+        # Search for WebODM output folders. os.listdir is in filesystem order, so sort:
+        # task names end in a YYYYMMDD-HHMMSS stamp, which sorts chronologically, making
+        # the last entry genuinely the newest rather than whichever the OS happened to
+        # hand back last.
+        webodm_dirs = sorted(d for d in os.listdir(inputFolder) if d.startswith("WebODM_"))
         if not webodm_dirs:
             slicer.util.errorDisplay("No WebODM output folders found.")
             return
 
-        # For now, use the first one found (could add selection dialog)
         latest_dir = os.path.join(inputFolder, webodm_dirs[-1])
         odm_texturing = os.path.join(latest_dir, "odm_texturing")
         
