@@ -474,19 +474,26 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         """Resume monitoring a task that is already on the node"""
         self.webODMManager.onReconnectTaskClicked()
 
+    def sanitizeDatasetName(self, text):
+        """
+        Reduce a dataset name to characters that are safe in a folder name.
+
+        This names WebODM_<name> and WebODM_<name>.json on disk, so it has to hold for
+        anything the user types, not just names derived from a folder.
+        """
+        import re
+        cleaned = re.sub(r'[^A-Za-z0-9._-]+', '_', text or "").strip('_.')
+        return cleaned or "SlicerReconstruction"
+
     def datasetNameFromFolder(self, folder):
         """
         Name a dataset after the folder its photos came from.
 
         The name is all the node knows about a task: it has no idea which folder was
         uploaded. Left at the default, every task was called 'SlicerReconstruction' and
-        two different specimens were indistinguishable on the dashboard. Restricted to
-        characters that are safe in a folder name, since it also names WebODM_<name>.
+        two different specimens were indistinguishable on the dashboard.
         """
-        import re
-        base = os.path.basename(os.path.normpath(folder or ""))
-        base = re.sub(r'[^A-Za-z0-9._-]+', '_', base).strip('_.')
-        return base or "SlicerReconstruction"
+        return self.sanitizeDatasetName(os.path.basename(os.path.normpath(folder or "")))
 
     def onInputFolderChanged(self, folder):
         """Track the images folder, unless the user has named the dataset themselves."""
@@ -938,7 +945,9 @@ class ODMManager:
         params["max-concurrency"] = self.widget.maxConcurrencySpinBox.value
         
         # Generate task name based on parameters (creates a short hash-based name)
-        prefix = self.widget.datasetNameLineEdit.text.strip() or "SlicerReconstruction"
+        # Sanitize here too: the field is free text, and folder-tracking stops the moment
+        # the user types their own name, so this is the only guard on what they typed.
+        prefix = self.widget.sanitizeDatasetName(self.widget.datasetNameLineEdit.text.strip())
         shortTaskName = self.generateShortTaskName(prefix, params, inputFolder)
 
         # create_task uploads every file on the UI thread, which for a few hundred images
@@ -1154,10 +1163,18 @@ class ODMManager:
         return records
 
     def describeTask(self, info, records=None):
-        """One line per task for the reconnect picker."""
+        """
+        One line per task for the reconnect picker.
+
+        Leads with the UUID: the picker returns the chosen string and we map it back by
+        index, so two tasks rendering the same text would attach the wrong one -- and
+        unnamed tasks with matching status/date/count do collide. The UUID is unique by
+        construction, and it is also the first thing the NodeODM dashboard shows, so it
+        is what you match against by eye.
+        """
         stamp = info.date_created.strftime("%Y-%m-%d %H:%M") if info.date_created else "?"
         tag = "   <- from this folder" if records and info.uuid in records else ""
-        return (f"{info.name or '(unnamed)'}  |  {info.status.name}  |  "
+        return (f"{info.uuid[:8]}  |  {info.name or '(unnamed)'}  |  {info.status.name}  |  "
                 f"{stamp} UTC  |  {info.images_count} images{tag}")
 
     def onReconnectTaskClicked(self):
@@ -1349,11 +1366,18 @@ class ODMManager:
             slicer.util.errorDisplay("No input folder selected.")
             return
 
-        # Search for WebODM output folders. os.listdir is in filesystem order, so sort:
-        # task names end in a YYYYMMDD-HHMMSS stamp, which sorts chronologically, making
-        # the last entry genuinely the newest rather than whichever the OS happened to
-        # hand back last.
-        webodm_dirs = sorted(d for d in os.listdir(inputFolder) if d.startswith("WebODM_"))
+        # Results folders only. writeTaskRecord drops a WebODM_<name>.json beside each
+        # results folder, and "WebODM_X.json" sorts after "WebODM_X", so matching on the
+        # prefix alone would pick the record file every time.
+        #
+        # Order by mtime, not by name: a name leads with the dataset name and a settings
+        # hash, so lexicographic order stops being chronological as soon as either
+        # differs between runs. mtime is when the results actually landed.
+        webodm_dirs = sorted(
+            (d for d in os.listdir(inputFolder)
+             if d.startswith("WebODM_") and os.path.isdir(os.path.join(inputFolder, d))),
+            key=lambda d: os.path.getmtime(os.path.join(inputFolder, d))
+        )
         if not webodm_dirs:
             slicer.util.errorDisplay("No WebODM output folders found.")
             return
