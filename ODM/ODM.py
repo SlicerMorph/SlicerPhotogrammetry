@@ -57,6 +57,8 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.launchWebODMTaskButton = None
         self.webodmLogTextEdit = None
         self.stopMonitoringButton = None
+        self.cancelTaskButton = None
+        self.nodeDashboardLabel = None
         
         # NodeODM management
         self.launchWebODMButton = None
@@ -86,7 +88,7 @@ class ODMWidget(ScriptedLoadableModuleWidget):
             "min-num-features": [50000, 10000, 20000],
             "pc-filter": [1, 2, 3, 4, 5],
             "depthmap-resolution": [3072, 2048, 4096, 8192],
-            "matcher-type": ["bruteforce", "bow", "flann"],
+            "matcher-type": ["flann", "bow", "bruteforce"],
             "feature-type": ["dspsift", "akaze", "hahog", "orb", "sift"],
             "feature-quality": ["ultra", "medium", "high"],
             "pc-quality": ["high", "medium", "ultra"],
@@ -203,7 +205,18 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.nodePortSpinBox.setValue(3002)
         self.nodePortSpinBox.setToolTip("Port number on which NodeODM is listening. Commonly 3001 or 3002.")
         webodmTaskFormLayout.addRow("Node Port:", self.nodePortSpinBox)
-        
+
+        self.nodeDashboardLabel = qt.QLabel()
+        self.nodeDashboardLabel.setOpenExternalLinks(True)
+        self.nodeDashboardLabel.setToolTip(
+            "Opens the NodeODM dashboard in your browser.\n"
+            "Shows every task on this node (running, queued and finished) and lets you cancel them."
+        )
+        webodmTaskFormLayout.addRow("Node Dashboard:", self.nodeDashboardLabel)
+        self.nodeIPLineEdit.connect('textChanged(QString)', self.onNodeAddressChanged)
+        self.nodePortSpinBox.connect('valueChanged(int)', self.onNodeAddressChanged)
+        self.updateNodeDashboardLink()
+
         # WebODM parameter tooltips
         parameterTooltips = {
             "ignore-gsd": (
@@ -296,10 +309,14 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         # TODO: Add WebODM parameter controls here (will be added in next step)
         
         self.datasetNameLineEdit = qt.QLineEdit("SlicerReconstruction")
-        self.datasetNameLineEdit.setToolTip("Name of the dataset in WebODM.\\nThis will be the reconstruction folder label.")
+        self.datasetNameLineEdit.setToolTip("Name of the dataset in WebODM.\nThis will be the reconstruction folder label.")
         webodmTaskFormLayout.addRow("name:", self.datasetNameLineEdit)
         
-        self.launchWebODMTaskButton = qt.QPushButton("Run NodeODM Task With Selected Parameters (non-blocking)")
+        self.launchWebODMTaskButton = qt.QPushButton("Run NodeODM Task With Selected Parameters")
+        self.launchWebODMTaskButton.setToolTip(
+            "Uploads the images and queues one reconstruction task on the node.\n"
+            "Uploading can take several minutes for large image sets."
+        )
         webodmTaskFormLayout.addWidget(self.launchWebODMTaskButton)
         self.launchWebODMTaskButton.setEnabled(True)
         
@@ -307,9 +324,20 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.webodmLogTextEdit.setReadOnly(True)
         webodmTaskFormLayout.addRow("Console Log:", self.webodmLogTextEdit)
         
+        taskControlRow = qt.QHBoxLayout()
         self.stopMonitoringButton = qt.QPushButton("Stop Monitoring")
         self.stopMonitoringButton.setEnabled(False)
-        webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
+        self.stopMonitoringButton.setToolTip(
+            "Stop updating this log. The task keeps running on the node.\n"
+            "Use 'Cancel Task' to actually stop it."
+        )
+        taskControlRow.addWidget(self.stopMonitoringButton)
+
+        self.cancelTaskButton = qt.QPushButton("Cancel Task")
+        self.cancelTaskButton.setEnabled(False)
+        self.cancelTaskButton.setToolTip("Cancel the monitored task on the node itself.")
+        taskControlRow.addWidget(self.cancelTaskButton)
+        webodmTaskFormLayout.addRow(taskControlRow)
         
         self.importModelButton = qt.QPushButton("Import Reconstructed Model")
         self.layout.addWidget(self.importModelButton)
@@ -339,6 +367,7 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.stopWebODMButton.connect('clicked(bool)', self.onStopNodeClicked)
         self.launchWebODMTaskButton.connect('clicked(bool)', self.onRunWebODMTask)
         self.stopMonitoringButton.connect('clicked(bool)', self.onStopMonitoring)
+        self.cancelTaskButton.connect('clicked(bool)', self.onCancelTaskClicked)
         self.importModelButton.connect('clicked(bool)', self.onImportModelClicked)
         # self.saveTaskButton.connect('clicked(bool)', self.onSaveTaskClicked)
         # self.restoreTaskButton.connect('clicked(bool)', self.onRestoreTaskClicked)
@@ -365,7 +394,7 @@ class ODMWidget(ScriptedLoadableModuleWidget):
             os.chmod(self.webODMLocalFolder, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
             logging.info(f"WebODM folder created and permissions set: {self.webODMLocalFolder}")
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\\n{str(e)}")
+            slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\n{str(e)}")
     
     def _ensurePyODMInstalled(self):
         """Check if pyodm is installed, and install it if missing."""
@@ -378,13 +407,13 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         
         # Ask user to install
         if not slicer.util.confirmOkCancelDisplay(
-            "The ODM module requires the 'pyodm' Python package.\\n\\n"
+            "The ODM module requires the 'pyodm' Python package.\n\n"
             "Install it now?",
             "Install pyodm"
         ):
             slicer.util.warningDisplay(
-                "pyodm is required for this module to function.\\n"
-                "You can install it manually via:\\n"
+                "pyodm is required for this module to function.\n"
+                "You can install it manually via:\n"
                 "pip install pyodm"
             )
             return
@@ -393,7 +422,7 @@ class ODMWidget(ScriptedLoadableModuleWidget):
             slicer.util.pip_install("pyodm")
             slicer.util.infoDisplay("pyodm installed successfully!")
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to install pyodm:\\n{e}\\n\\nPlease install manually:\\npip install pyodm")
+            slicer.util.errorDisplay(f"Failed to install pyodm:\n{e}\n\nPlease install manually:\npip install pyodm")
 
     def onLaunchWebODMClicked(self):
         """Launch NodeODM container with GPU support on port 3002"""
@@ -410,7 +439,23 @@ class ODMWidget(ScriptedLoadableModuleWidget):
     def onStopMonitoring(self):
         """Stop monitoring the current task"""
         self.webODMManager.onStopMonitoring()
-    
+
+    def onCancelTaskClicked(self):
+        """Cancel the monitored task on the node"""
+        self.webODMManager.onCancelTaskClicked()
+
+    def nodeDashboardUrl(self):
+        """URL of the NodeODM dashboard for the currently configured node."""
+        return f"http://{self.nodeIPLineEdit.text.strip()}:{self.nodePortSpinBox.value}"
+
+    def onNodeAddressChanged(self, unusedValue=None):
+        """Keep the dashboard link in sync with the IP/port fields."""
+        self.updateNodeDashboardLink()
+
+    def updateNodeDashboardLink(self):
+        url = self.nodeDashboardUrl()
+        self.nodeDashboardLabel.setText(f'<a href="{url}">{url}</a>')
+
     def onImportModelClicked(self):
         """Import the reconstructed 3D model into Slicer"""
         self.webODMManager.onImportModelClicked()
@@ -601,7 +646,7 @@ class ODMManager:
         """
         proceed = slicer.util.confirmYesNoDisplay(
             "This action will ensure nodeodm:gpu is installed (pull if needed), "
-            "stop any running container on port 3002, and launch a new one.\\n\\n"
+            "stop any running container on port 3002, and launch a new one.\n\n"
             "Proceed?"
         )
         if not proceed:
@@ -612,7 +657,7 @@ class ODMManager:
         try:
             subprocess.run(["docker", "--version"], check=True, capture_output=True)
         except Exception as e:
-            slicer.util.warningDisplay(f"Docker not found or not in PATH.\\nError: {str(e)}")
+            slicer.util.warningDisplay(f"Docker not found or not in PATH.\nError: {str(e)}")
             return
         
         # Check if image exists, pull if needed
@@ -677,7 +722,7 @@ class ODMManager:
             slicer.app.settings().setValue("ODM/WebODMIP", "127.0.0.1")
             slicer.app.settings().setValue("ODM/WebODMPort", "3002")
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to launch WebODM container:\\n{str(e)}")
+            slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
 
     def onStopNodeClicked(self):
         """
@@ -687,7 +732,7 @@ class ODMManager:
 
         if jobInProgress:
             proceed = slicer.util.confirmYesNoDisplay(
-                "A WebODM task appears to be in progress. Stopping the node now will cancel that task.\\n\\n"
+                "A WebODM task appears to be in progress. Stopping the node now will cancel that task.\n\n"
                 "Do you want to continue?"
             )
             if not proceed:
@@ -710,12 +755,22 @@ class ODMManager:
                     subprocess.run(["docker", "stop", cid], check=True)
             slicer.util.infoDisplay("NodeODM container stopped.")
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to stop container:\\n{str(e)}")
+            slicer.util.errorDisplay(f"Failed to stop container:\n{str(e)}")
 
     def onRunWebODMTask(self):
         """
-        Create and execute a WebODM reconstruction task
+        Create and execute a WebODM reconstruction task.
+
+        The button is held disabled for the whole call: the upload below runs on the UI
+        thread, and every click here queues a separate task on the node.
         """
+        self.widget.launchWebODMTaskButton.setEnabled(False)
+        try:
+            self._runWebODMTask()
+        finally:
+            self.widget.launchWebODMTaskButton.setEnabled(True)
+
+    def _runWebODMTask(self):
         try:
             from pyodm import Node
         except ImportError:
@@ -727,7 +782,7 @@ class ODMManager:
         try:
             node = Node(node_ip, node_port)
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to connect to Node at {node_ip}:{node_port}\\n{str(e)}")
+            slicer.util.errorDisplay(f"Failed to connect to Node at {node_ip}:{node_port}\n{str(e)}")
             return
 
         inputFolder = self.widget.inputFolderSelector.directory
@@ -761,6 +816,30 @@ class ODMManager:
         else:
             slicer.util.infoDisplay("No combined_gcp_list.txt found. Proceeding without GCP...")
 
+        # Node.__init__ does not talk to the network, so this is the first call that
+        # actually proves the node is up -- and it tells us what is already queued.
+        dashboardUrl = self.widget.nodeDashboardUrl()
+        try:
+            nodeInfo = node.info()
+        except Exception as e:
+            slicer.util.errorDisplay(
+                f"Could not reach NodeODM at {dashboardUrl}\n\n{str(e)}\n\n"
+                "Is the node running? Use 'Launch NodeODM' above to start it."
+            )
+            return
+
+        queuedCount = nodeInfo.task_queue_count or 0
+        if queuedCount > 0:
+            proceed = slicer.util.confirmYesNoDisplay(
+                f"This node already has {queuedCount} task(s) running or queued.\n\n"
+                "A new task waits in line behind them, and will just report "
+                "'Queued, Progress: 0%' until they finish.\n\n"
+                f"Review or cancel existing tasks at:\n{dashboardUrl}\n\n"
+                "Queue another task anyway?"
+            )
+            if not proceed:
+                return
+
         # Build parameters from baseline + UI selections
         params = dict(self.widget.baselineParams)
 
@@ -785,21 +864,49 @@ class ODMManager:
         prefix = self.widget.datasetNameLineEdit.text.strip() or "SlicerReconstruction"
         shortTaskName = self.generateShortTaskName(prefix, params)
 
-        slicer.util.infoDisplay("Creating WebODM Task (non-blocking). Upload may take time...")
+        # create_task uploads every file on the UI thread, which for a few hundred images
+        # means minutes of frozen application. Drive a progress dialog from pyodm's
+        # callback so the upload is visibly alive.
+        fileCount = len(files_to_upload)
+        progressDialog = slicer.util.createProgressDialog(
+            windowTitle="Creating NodeODM Task",
+            labelText=f"Uploading {fileCount} file(s) to NodeODM...",
+            maximum=100
+        )
+        progressDialog.setCancelButton(None)
+        progressDialog.show()
+        slicer.app.processEvents()
+
+        def onUploadProgress(percent):
+            progressDialog.labelText = f"Uploading {fileCount} file(s) to NodeODM... {percent:.0f}%"
+            progressDialog.setValue(int(percent))
+            slicer.app.processEvents()
 
         try:
-            self.webodmTask = node.create_task(files=files_to_upload, options=params, name=shortTaskName)
+            self.webodmTask = node.create_task(
+                files=files_to_upload,
+                options=params,
+                name=shortTaskName,
+                progress_callback=onUploadProgress
+            )
         except Exception as e:
-            slicer.util.errorDisplay(f"Task creation failed:\\n{str(e)}")
+            slicer.util.errorDisplay(f"Task creation failed:\n{str(e)}")
             return
+        finally:
+            progressDialog.close()
 
-        slicer.util.infoDisplay(f"Task '{shortTaskName}' created successfully. Monitoring progress...")
+        slicer.util.infoDisplay(
+            f"Task '{shortTaskName}' created successfully. Monitoring progress...",
+            autoCloseMsec=3000
+        )
 
         self.webodmOutDir = os.path.join(inputFolder, f"WebODM_{shortTaskName}")
         os.makedirs(self.webodmOutDir, exist_ok=True)
 
         self.widget.webodmLogTextEdit.clear()
+        self.widget.webodmLogTextEdit.append(f"Task '{shortTaskName}' queued on {dashboardUrl}")
         self.widget.stopMonitoringButton.setEnabled(True)
+        self.widget.cancelTaskButton.setEnabled(True)
 
         self.lastWebODMOutputLineIndex = 0
 
@@ -834,13 +941,61 @@ class ODMManager:
         """
         Stop monitoring the current task (task continues on server)
         """
+        self._stopMonitoringTimer()
+        self.webodmTask = None
+        self.widget.stopMonitoringButton.setEnabled(False)
+        self.widget.cancelTaskButton.setEnabled(False)
+        self.widget.webodmLogTextEdit.append(
+            "Stopped monitoring. The task is still running on the node -- see "
+            f"{self.widget.nodeDashboardUrl()} to follow or cancel it."
+        )
+
+    def _stopMonitoringTimer(self):
         if self.webodmTimer:
             self.webodmTimer.stop()
             self.webodmTimer.deleteLater()
             self.webodmTimer = None
+
+    def onCancelTaskClicked(self):
+        """
+        Cancel the monitored task on the node itself (unlike Stop Monitoring,
+        which only stops Slicer from watching it).
+        """
+        if not self.webodmTask:
+            slicer.util.infoDisplay("No task is currently being monitored.")
+            return
+
+        if not slicer.util.confirmYesNoDisplay(
+            "Cancel the monitored task on the node?\n\nThis cannot be undone."
+        ):
+            return
+
+        try:
+            self.webodmTask.cancel()
+        except Exception as e:
+            slicer.util.warningDisplay(
+                f"Failed to cancel the task:\n{str(e)}\n\n"
+                f"You can also cancel it at {self.widget.nodeDashboardUrl()}"
+            )
+            return
+
+        self.widget.webodmLogTextEdit.append("Task canceled on the node.")
+        self._stopMonitoringTimer()
         self.webodmTask = None
         self.widget.stopMonitoringButton.setEnabled(False)
-        self.widget.webodmLogTextEdit.append("Stopped monitoring.")
+        self.widget.cancelTaskButton.setEnabled(False)
+
+    def queuedTaskCount(self):
+        """
+        How many tasks are running or queued on the node, or None if it can't be asked.
+        Used to explain a task sitting at 'Queued, Progress: 0%'.
+        """
+        try:
+            from pyodm import Node
+            node = Node(self.widget.nodeIPLineEdit.text.strip(), self.widget.nodePortSpinBox.value)
+            return node.info().task_queue_count
+        except Exception:
+            return None
 
     def checkWebODMTaskStatus(self):
         """
@@ -861,7 +1016,16 @@ class ODMManager:
                 self.widget.webodmLogTextEdit.append(line)
             self.lastWebODMOutputLineIndex += len(newLines)
 
-        self.widget.webodmLogTextEdit.append(f"Status: {info.status.name}, Progress: {info.progress}%")
+        statusLine = f"Status: {info.status.name}, Progress: {info.progress}%"
+        if info.status.name.lower() == "queued":
+            # "Queued, 0%" on its own reads as a hang. Say what it is waiting behind.
+            aheadCount = self.queuedTaskCount()
+            if aheadCount is not None and aheadCount > 1:
+                statusLine += (
+                    f" -- {aheadCount} task(s) running or queued on this node; "
+                    f"yours is waiting its turn. See {self.widget.nodeDashboardUrl()}"
+                )
+        self.widget.webodmLogTextEdit.append(statusLine)
         cursor = self.widget.webodmLogTextEdit.textCursor()
         cursor.movePosition(qt.QTextCursor.End)
         self.widget.webodmLogTextEdit.setTextCursor(cursor)
@@ -873,25 +1037,21 @@ class ODMManager:
             slicer.app.processEvents()
             try:
                 self.webodmTask.download_assets(self.webodmOutDir)
-                slicer.util.infoDisplay(f"Results downloaded to:\\n{self.webodmOutDir}")
+                slicer.util.infoDisplay(f"Results downloaded to:\n{self.webodmOutDir}")
             except Exception as e:
                 slicer.util.warningDisplay(f"Download failed: {str(e)}")
 
-            if self.webodmTimer:
-                self.webodmTimer.stop()
-                self.webodmTimer.deleteLater()
-                self.webodmTimer = None
+            self._stopMonitoringTimer()
             self.webodmTask = None
             self.widget.stopMonitoringButton.setEnabled(False)
+            self.widget.cancelTaskButton.setEnabled(False)
         elif info.status.name.lower() in ["failed", "canceled"]:
             self.widget.webodmLogTextEdit.append("Task failed or canceled. Stopping.")
             slicer.app.processEvents()
-            if self.webodmTimer:
-                self.webodmTimer.stop()
-                self.webodmTimer.deleteLater()
-                self.webodmTimer = None
+            self._stopMonitoringTimer()
             self.webodmTask = None
             self.widget.stopMonitoringButton.setEnabled(False)
+            self.widget.cancelTaskButton.setEnabled(False)
 
     def onImportModelClicked(self):
         """
@@ -922,7 +1082,7 @@ class ODMManager:
             return
 
         obj_path = os.path.join(odm_texturing, obj_files[0])
-        slicer.util.infoDisplay(f"Importing model from:\\n{obj_path}")
+        slicer.util.infoDisplay(f"Importing model from:\n{obj_path}")
 
         try:
             modelNode = slicer.util.loadModel(obj_path)
@@ -932,7 +1092,7 @@ class ODMManager:
                 layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
                 slicer.util.infoDisplay("Model imported successfully!")
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to import model:\\n{str(e)}")
+            slicer.util.errorDisplay(f"Failed to import model:\n{str(e)}")
 
 
 class ODMLogic(ScriptedLoadableModuleLogic):
