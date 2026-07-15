@@ -102,6 +102,8 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         # Dataset name and concurrency
         self.datasetNameLineEdit = None
         self.maxConcurrencySpinBox = None
+        # Set once the user types their own dataset name; stops it tracking the folder.
+        self._datasetNameEdited = False
         
         # GCP (Ground Control Points)
         self.findGCPScriptSelector = None
@@ -310,7 +312,12 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         # TODO: Add WebODM parameter controls here (will be added in next step)
         
         self.datasetNameLineEdit = qt.QLineEdit("SlicerReconstruction")
-        self.datasetNameLineEdit.setToolTip("Name of the dataset in WebODM.\nThis will be the reconstruction folder label.")
+        self.datasetNameLineEdit.setToolTip(
+            "Labels this dataset on the node, and names the WebODM_<name> results folder.\n\n"
+            "Defaults to the images folder's own name (e.g. UWBM_82409), so a task on the node\n"
+            "says which photos it came from rather than only when it ran.\n"
+            "Type your own and it stops following the folder."
+        )
         webodmTaskFormLayout.addRow("name:", self.datasetNameLineEdit)
         
         self.launchWebODMTaskButton = qt.QPushButton("Run NodeODM Task With Selected Parameters")
@@ -381,6 +388,13 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         self.cancelTaskButton.connect('clicked(bool)', self.onCancelTaskClicked)
         self.reconnectTaskButton.connect('clicked(bool)', self.onReconnectTaskClicked)
         self.importModelButton.connect('clicked(bool)', self.onImportModelClicked)
+
+        # Keep the dataset name following the images folder until the user overrides it.
+        # textEdited fires only for real typing, not for setText, so the flag below is
+        # never tripped by our own updates.
+        self.inputFolderSelector.connect('directoryChanged(QString)', self.onInputFolderChanged)
+        self.datasetNameLineEdit.connect('textEdited(QString)', self.onDatasetNameEdited)
+        self.onInputFolderChanged(self.inputFolderSelector.directory)
         # self.saveTaskButton.connect('clicked(bool)', self.onSaveTaskClicked)
         # self.restoreTaskButton.connect('clicked(bool)', self.onRestoreTaskClicked)
         
@@ -459,6 +473,29 @@ class ODMWidget(ScriptedLoadableModuleWidget):
     def onReconnectTaskClicked(self):
         """Resume monitoring a task that is already on the node"""
         self.webODMManager.onReconnectTaskClicked()
+
+    def datasetNameFromFolder(self, folder):
+        """
+        Name a dataset after the folder its photos came from.
+
+        The name is all the node knows about a task: it has no idea which folder was
+        uploaded. Left at the default, every task was called 'SlicerReconstruction' and
+        two different specimens were indistinguishable on the dashboard. Restricted to
+        characters that are safe in a folder name, since it also names WebODM_<name>.
+        """
+        import re
+        base = os.path.basename(os.path.normpath(folder or ""))
+        base = re.sub(r'[^A-Za-z0-9._-]+', '_', base).strip('_.')
+        return base or "SlicerReconstruction"
+
+    def onInputFolderChanged(self, folder):
+        """Track the images folder, unless the user has named the dataset themselves."""
+        if self._datasetNameEdited:
+            return
+        self.datasetNameLineEdit.setText(self.datasetNameFromFolder(folder))
+
+    def onDatasetNameEdited(self, unusedText=None):
+        self._datasetNameEdited = True
 
     def nodeDashboardUrl(self):
         """URL of the NodeODM dashboard for the currently configured node."""
@@ -902,7 +939,7 @@ class ODMManager:
         
         # Generate task name based on parameters (creates a short hash-based name)
         prefix = self.widget.datasetNameLineEdit.text.strip() or "SlicerReconstruction"
-        shortTaskName = self.generateShortTaskName(prefix, params)
+        shortTaskName = self.generateShortTaskName(prefix, params, inputFolder)
 
         # create_task uploads every file on the UI thread, which for a few hundred images
         # means minutes of frozen application. Drive a progress dialog from pyodm's
@@ -958,6 +995,11 @@ class ODMManager:
         self.widget.webodmLogTextEdit.append(f"  node task UUID: {self.webodmTask.uuid}")
         self.widget.webodmLogTextEdit.append(f"  results will download to: {self.webodmOutDir}")
 
+        recordPath = self.writeTaskRecord(
+            inputFolder, shortTaskName, dashboardUrl, params, len(all_images))
+        if recordPath:
+            self.widget.webodmLogTextEdit.append(f"  task record: {recordPath}")
+
         self.lastWebODMOutputLineIndex = 0
 
         if self.webodmTimer:
@@ -973,7 +1015,23 @@ class ODMManager:
         if hasattr(self.widget, 'saveTaskButton') and self.widget.saveTaskButton:
             self.widget.saveTaskButton.enabled = True
     
-    def generateShortTaskName(self, basePrefix, paramsDict):
+    def uniqueTaskName(self, inputFolder, name):
+        """
+        Make sure the name is not already spoken for on disk.
+
+        The stamp has one-second resolution, so two jobs submitted inside the same second
+        get the same name -- and a colliding name means the second job's record and
+        results land on top of the first's. Rare with real uploads, silent when it does
+        happen, so check rather than assume.
+        """
+        candidate, n = name, 1
+        while (os.path.exists(self.taskRecordPath(inputFolder, candidate)) or
+               os.path.exists(os.path.join(inputFolder, f"WebODM_{candidate}"))):
+            n += 1
+            candidate = f"{name}-{n}"
+        return candidate
+
+    def generateShortTaskName(self, basePrefix, paramsDict, inputFolder=None):
         """
         Name a task uniquely: prefix, a hash of the parameters, and the start time.
 
@@ -992,7 +1050,8 @@ class ODMManager:
         hashObj = hashlib.sha256(paramsStr.encode('utf-8'))
         shortHash = hashObj.hexdigest()[:8]
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        return f"{basePrefix}_{shortHash}_{stamp}"
+        name = f"{basePrefix}_{shortHash}_{stamp}"
+        return self.uniqueTaskName(inputFolder, name) if inputFolder else name
 
     def onStopMonitoring(self):
         """
@@ -1040,11 +1099,66 @@ class ODMManager:
         self.webodmTask = None
         self._updateTaskButtons()
 
-    def describeTask(self, info):
+    def taskRecordPath(self, inputFolder, taskName):
+        """The record sits beside the results: WebODM_<name>.json next to WebODM_<name>/."""
+        return os.path.join(inputFolder, f"WebODM_{taskName}.json")
+
+    def writeTaskRecord(self, inputFolder, taskName, dashboardUrl, params, imageCount):
+        """
+        Write down the tie between this folder and the node's task.
+
+        The node's UUID is the only identifier that is unique by construction, but it
+        lives only on the node -- which forgets finished tasks after 48h by default. The
+        record is what survives that, plus Stop Monitoring and Slicer restarts, and it
+        makes an images folder self-describing: one .json per job submitted from it,
+        sitting next to the results folder it will produce.
+        """
+        import datetime
+        record = {
+            "uuid": self.webodmTask.uuid,
+            "name": taskName,
+            "node": dashboardUrl,
+            "created": datetime.datetime.now().isoformat(timespec="seconds"),
+            "images_folder": inputFolder,
+            "image_count": imageCount,
+            "output_folder": f"WebODM_{taskName}",
+            "options": params,
+        }
+        path = self.taskRecordPath(inputFolder, taskName)
+        try:
+            with open(path, "w") as f:
+                json.dump(record, f, indent=2, sort_keys=True)
+        except Exception as e:
+            # A record is a convenience; never fail a live task over it.
+            self.widget.webodmLogTextEdit.append(f"  (could not write task record: {e})")
+            return None
+        return path
+
+    def readTaskRecords(self, inputFolder):
+        """uuid -> record, for every job submitted from this folder."""
+        records = {}
+        try:
+            names = os.listdir(inputFolder)
+        except Exception:
+            return records
+        for fn in names:
+            if not (fn.startswith("WebODM_") and fn.endswith(".json")):
+                continue
+            try:
+                with open(os.path.join(inputFolder, fn)) as f:
+                    rec = json.load(f)
+            except Exception:
+                continue  # hand-edited or truncated; ignore rather than break the picker
+            if isinstance(rec, dict) and rec.get("uuid"):
+                records[rec["uuid"]] = rec
+        return records
+
+    def describeTask(self, info, records=None):
         """One line per task for the reconnect picker."""
         stamp = info.date_created.strftime("%Y-%m-%d %H:%M") if info.date_created else "?"
+        tag = "   <- from this folder" if records and info.uuid in records else ""
         return (f"{info.name or '(unnamed)'}  |  {info.status.name}  |  "
-                f"{stamp} UTC  |  {info.images_count} images")
+                f"{stamp} UTC  |  {info.images_count} images{tag}")
 
     def onReconnectTaskClicked(self):
         """
@@ -1104,8 +1218,11 @@ class ODMManager:
             )
             return
 
+        # Cross-reference the node's tasks against the records written from this folder,
+        # so the picker can say which of them are yours.
+        records = self.readTaskRecords(inputFolder)
         tasks.sort(key=lambda i: i.date_created, reverse=True)
-        labels = [self.describeTask(i) for i in tasks]
+        labels = [self.describeTask(i, records) for i in tasks]
 
         # PythonQt's binding for QInputDialog.getItem returns just the selected string
         # (empty on cancel), not the (value, ok) tuple the C++/PyQt API uses.
@@ -1120,15 +1237,21 @@ class ODMManager:
         if not chosen or chosen not in labels:
             return
 
-        self.attachToTask(node, tasks[labels.index(chosen)], inputFolder, dashboardUrl)
+        self.attachToTask(node, tasks[labels.index(chosen)], inputFolder, dashboardUrl, records)
 
-    def attachToTask(self, node, info, inputFolder, dashboardUrl):
+    def attachToTask(self, node, info, inputFolder, dashboardUrl, records=None):
         """Resume monitoring an existing node task and route its results to disk."""
         self.webodmTask = node.get_task(info.uuid)
 
-        # The task name is the folder key (WebODM_<name>), which is why names carry a
-        # timestamp. A task created outside Slicer may be unnamed; fall back to its UUID.
-        folderKey = info.name or f"task_{info.uuid[:8]}"
+        # A record written when we submitted the task is authoritative about where its
+        # results belong. Failing that, fall back to the task name (which is what names
+        # WebODM_<name>), and for tasks created outside Slicer, which have no name, to
+        # the UUID.
+        record = (records or {}).get(info.uuid)
+        if record and record.get("output_folder"):
+            folderKey = record["output_folder"][len("WebODM_"):]
+        else:
+            folderKey = info.name or f"task_{info.uuid[:8]}"
         self.webodmOutDir = os.path.join(inputFolder, f"WebODM_{folderKey}")
 
         self.widget.webodmLogTextEdit.clear()
