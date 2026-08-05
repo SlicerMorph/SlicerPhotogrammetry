@@ -61,10 +61,14 @@ decline the UAC prompt, you get exactly this. Checking takes a second:
 (Get-Item C:\Windows\System32\MSVCP140.dll).VersionInfo.FileVersion
 ```
 
-If that reports below **14.40**, or the file is missing, install the
-[VC++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) and reboot
-before you start. Doing it now costs a minute; discovering it later costs a full masking
-run and a failed task.
+If that reports below **14.40**, or the file is missing, install
+[VC_redist.x64.exe 14.44.35211](https://download.visualstudio.microsoft.com/download/pr/9b0d1fa5-c16d-4ee8-97f0-c2734086ece8/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe)
+(24 MB) and reboot before you start. Doing it now costs a minute; discovering it later
+costs a full masking run and a failed task.
+
+That is the exact build this document was verified against. Microsoft's evergreen link,
+<https://aka.ms/vs/17/release/vc_redist.x64.exe>, always serves the current
+release - newer is fine here, since the runtime is backward compatible.
 
 ---
 
@@ -110,12 +114,18 @@ copy of the source rather than installed through the Extensions Manager.
 ODM is the reconstruction engine. OpenDroneMap publishes a free native Windows
 installer on GitHub.
 
-1. Go to the [ODM releases page](https://github.com/OpenDroneMap/ODM/releases).
-2. Download the `ODM_Setup_<version>.exe` asset from the latest release that has one.
-   As of August 2026 that is **ODM_Setup_3.6.1.exe** (234 MB, published 28 July 2026).
+1. Download the installer this document was verified with, **ODM 3.6.1**:
 
-   Note that not every ODM release ships a Windows installer - if the newest release has
-   only source archives, take the most recent one that has an `.exe`.
+   <https://github.com/OpenDroneMap/ODM/releases/download/v3.6.1/ODM_Setup_3.6.1.exe>
+
+   234 MB, published 28 July 2026. That link is pinned to the release tag and will keep
+   serving this exact file.
+2. Nothing here assumes 3.6.1 in particular, so a newer installer is worth trying - but
+   note that **not every ODM release ships a Windows installer.** `v3.6.0` and `v3.5.6`,
+   for instance, have source archives only. Check the
+   [releases page](https://github.com/OpenDroneMap/ODM/releases) and take the newest tag
+   that actually has an `ODM_Setup_<version>.exe` asset. If it misbehaves, the pinned
+   3.6.1 above is the known-good fallback.
 3. Run the installer and **accept the default install location, `C:\ODM`.**
 
    > **Do not install into a path with spaces in it** (not `C:\Program Files\ODM`, not a
@@ -154,12 +164,15 @@ You do not need to open the ODM Console. Slicer never calls ODM directly - NodeO
 NodeODM is a small server that puts a web API in front of ODM. Slicer talks to it, and
 it runs your jobs. The Windows bundle is self-contained - no Node.js install needed.
 
-1. Go to the [NodeODM releases page](https://github.com/OpenDroneMap/NodeODM/releases).
-2. Download **`nodeodm-windows-x64.zip`** (17 MB) from the latest release that has it.
-   That is **v2.2.3**, from May 2024 - no newer NodeODM release ships a Windows bundle,
-   so this is expected to look out of date. Because it is that old, it needs a one-file
-   patch to work with current ODM; see [Step 4b](#step-4b---patch-one-file-in-nodeodm-required)
-   below.
+1. Download the Windows bundle, **NodeODM v2.2.3**:
+
+   <https://github.com/OpenDroneMap/NodeODM/releases/download/v2.2.3/nodeodm-windows-x64.zip>
+
+   17 MB, published 15 May 2024. Unlike ODM, there is nothing newer to move to: v2.2.3 is
+   the **last NodeODM release that ships a Windows bundle at all**, so this link is not
+   going stale - it is the end of the line. It being that old is why it needs a one-file
+   patch to work with current ODM; see
+   [Step 4b](#step-4b---patch-one-file-in-nodeodm-required) below.
 3. Extract it to **`C:\NodeODM`**, again avoiding any path with spaces.
 
    You should end up with `C:\NodeODM\nodeodm.exe` alongside `helpers\` and `apps\`
@@ -199,13 +212,20 @@ In PowerShell:
 
 ```powershell
 Copy-Item C:\NodeODM\helpers\odmOptionsToJson.py C:\NodeODM\helpers\odmOptionsToJson.py.orig
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/OpenDroneMap/NodeODM/master/helpers/odmOptionsToJson.py -OutFile C:\NodeODM\helpers\odmOptionsToJson.py
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/OpenDroneMap/NodeODM/2dc1819b0b047e56529d7dd23182e853fa509077/helpers/odmOptionsToJson.py -OutFile C:\NodeODM\helpers\odmOptionsToJson.py
 ```
 
 Or download
-[odmOptionsToJson.py](https://raw.githubusercontent.com/OpenDroneMap/NodeODM/master/helpers/odmOptionsToJson.py)
+[odmOptionsToJson.py](https://raw.githubusercontent.com/OpenDroneMap/NodeODM/2dc1819b0b047e56529d7dd23182e853fa509077/helpers/odmOptionsToJson.py)
 in a browser and save it over `C:\NodeODM\helpers\odmOptionsToJson.py`, keeping a copy of
 the original first.
+
+That URL is pinned to commit
+[`2dc1819`](https://github.com/OpenDroneMap/NodeODM/commit/2dc1819b0b047e56529d7dd23182e853fa509077),
+"Upgrade to Python 3.12", which is the change that removed `imp` - 2,043 bytes, the file
+tested here. Pinning matters more than usual for this one: a `master` link would hand you
+whatever that file becomes later, and it has to stay compatible with a NodeODM bundle
+frozen in 2024.
 
 The replacement does the same job using `importlib` instead of `imp`. Nothing else in the
 bundle uses `imp`, so this one file is the whole fix.
