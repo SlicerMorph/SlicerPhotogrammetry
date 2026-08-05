@@ -149,11 +149,11 @@ installer on GitHub.
    above immediately:
 
    ```powershell
-   cmd /c "pushd C:\ODM && call win32env.bat && gdalinfo --version"
+   cmd /c "pushd C:\ODM && call .\win32env.bat && gdalinfo --version"
    ```
 
-   It should print something like `GDAL 3.11.1, released 2025/07/01`. If it prints
-   nothing at all, your VC++ runtime is too old.
+   It should print something like `GDAL 3.11.1 "Eganville", released 2025/06/25`. If it
+   prints nothing at all, your VC++ runtime is too old.
 
 You do not need to open the ODM Console. Slicer never calls ODM directly - NodeODM does.
 
@@ -173,13 +173,13 @@ it runs your jobs. The Windows bundle is self-contained - no Node.js install nee
    going stale - it is the end of the line. It being that old is why it needs a one-file
    patch to work with current ODM; see
    [Step 4b](#step-4b---patch-one-file-in-nodeodm-required) below.
-3. Extract it to **`C:\NodeODM`**, again avoiding any path with spaces.
+2. Extract it to **`C:\NodeODM`**, again avoiding any path with spaces.
 
    You should end up with `C:\NodeODM\nodeodm.exe` alongside `helpers\` and `apps\`
    folders. Keep those next to the executable; NodeODM looks for them relative to its
    own folder and will not start properly without them.
 
-4. Your reconstruction projects are stored in `C:\NodeODM\data\`, so make sure that
+3. Your reconstruction projects are stored in `C:\NodeODM\data\`, so make sure that
    drive has room.
 
 **About the SmartScreen warning.** The v2.2.3 executable is not code-signed, so Windows
@@ -299,6 +299,12 @@ its results. Use **Stop Node** to shut NodeODM down when you are done.
 their own Python packages into Slicer the first time you open them, and download model
 weights on demand. Expect the first run to take a while and to need a few GB of disk.
 
+Unlike ODM - which needs nothing but your GPU driver - the masking modules run PyTorch
+themselves, and they install a **cu128** build of it through the PyTorch extension. This
+is the one place where the CUDA build matters, and where a mismatch against your driver
+shows up as a masking failure rather than an install error. See
+[Troubleshooting](#troubleshooting) if a model fails to load on the GPU.
+
 **VideoMasking** works the same way but has more moving parts. On first setup it:
 
 - Fetches the SAMURAI source. It uses `git` when you have it, and downloads a zip when
@@ -306,15 +312,21 @@ weights on demand. Expect the first run to take a while and to need a few GB of 
 - Installs SAM 2 and its dependencies into Slicer's Python.
 - Downloads the `sam2.1_hiera_large.pt` checkpoint (about 900 MB). Slicer may look
   frozen during this; give it time.
-- Installs `imageio-ffmpeg` if there is no `ffmpeg` on your PATH, which provides the
-  ffmpeg used for frame extraction. You do not need to install ffmpeg yourself.
 
-Two messages during setup are expected on Windows and are not errors:
+`ffmpeg` is **not** installed by Configure SAMURAI. The first time you extract frames
+from a video, VideoMasking looks for `ffmpeg` on your PATH and, finding none, installs
+`imageio-ffmpeg` and uses the binary bundled in that package. So expect one more short
+download at the start of your first video run rather than during setup. You do not need
+to install ffmpeg yourself either way.
 
-- `optional package could not be installed: jpeg4py` - that package has no working
-  Windows build and nothing in the tracking pipeline uses it.
+Messages during setup that are expected on Windows and are not errors:
+
 - Anything about the SAM 2 CUDA extension not being built. It is deliberately skipped;
   it only affects optional mask post-processing.
+- `jpeg4py` installs without complaint but cannot actually load - the first call into it
+  raises `OSError: Could not load libjpeg-turbo library`, because the pip package is a
+  ctypes wrapper and the DLL it wants is not shipped for Windows. Nothing in the tracking
+  pipeline uses it, so this is harmless wherever it surfaces.
 
 ---
 
@@ -390,6 +402,37 @@ process needs its own memory.
 Check whether the log says `CUDA drivers detected`. If not and you do have an NVIDIA
 card, update your GPU driver. Very new cards occasionally need a newer ODM than the one
 you installed.
+
+**"Error loading SAM model: CUDA error: CUDA-capable device(s) is/are busy or unavailable"**
+This is PhotoMasking or VideoMasking, not ODM - masking runs PyTorch on your GPU, and the
+wheel it installed cannot claim the device. The masking modules install a specific CUDA
+build of PyTorch through the PyTorch extension; on this branch that is **cu128**. If the
+build in Slicer's Python does not match what your driver will serve, torch still imports
+and still reports `torch.cuda.is_available() == True` - that flag only proves the driver
+loaded, not that a context can be created - and the failure surfaces later, when a model
+is actually pushed to the GPU.
+
+Check what you have from the Slicer Python console:
+
+```python
+import torch
+print(torch.__version__, torch.version.cuda, torch.cuda.is_available())
+print(torch.randn(8, 8, device="cuda").sum())   # this is the real test
+```
+
+The first line passing but the second raising is exactly this problem. To reinstall
+against a different backend, replacing whatever is there now:
+
+```python
+import PyTorchUtils
+logic = PyTorchUtils.PyTorchUtilsLogic()
+logic.uninstallTorch(askConfirmation=False)
+logic.installTorch(askConfirmation=False, forceComputationBackend="cu128")
+```
+
+Restart Slicer afterwards. Note that VideoMasking gates on the CUDA version it targets
+and will refuse to run against a different one, so if you deliberately move off cu128 you
+have to change `VideoMasking.py` to match.
 
 ---
 

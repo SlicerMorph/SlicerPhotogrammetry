@@ -11,9 +11,9 @@ Features
   Finalize ROI & Run Tracking)
 - On module entry, set layout to One Up Red Slice (single viewer).
 
-GPU setup policy (aligns with Photogrammetry approach, using cu126 per request):
-- Install torch/torchvision via Slicer's PyTorchUtils with CUDA 12.6:
-    PyTorchUtils.PyTorchUtilsLogic().installTorch(..., forceComputationBackend='cu126')
+GPU setup policy (aligns with Photogrammetry approach, using cu128 per request):
+- Install torch/torchvision via Slicer's PyTorchUtils with CUDA 12.8:
+    PyTorchUtils.PyTorchUtilsLogic().installTorch(..., forceComputationBackend='cu128')
 - Do not import torch until AFTER we have exposed wheel-provided CUDA libs to the linker
   (site-packages/nvidia/*/lib + torch/lib) to avoid libcudnn_graph crashes.
 """
@@ -329,7 +329,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 self.destPathEdit.setText(saved)
 
         self._log(
-            "Click 'Configure SAMURAI' to clone/install everything (cu126). Then 'Verify Installation' to populate devices.")
+            "Click 'Configure SAMURAI' to clone/install everything (cu128). Then 'Verify Installation' to populate devices.")
 
         # === Video Prep ===
         vbox = ctk.ctkCollapsibleButton()
@@ -570,7 +570,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         # Default: JPG maximum quality (100)
         return (".jpg", False, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
 
-    # ---------- Configure: clone + deps + torch cu126 ----------
+    # ---------- Configure: clone + deps + torch cu128 ----------
     def onOpenFolderClicked(self):
         qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(self.supportDir())))
 
@@ -965,7 +965,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         self._log(f"Checkpoint set to: {target.name}")
         self._log("Download complete.")
 
-    def _ensure_torch_cu126(self) -> bool:
+    def _ensure_torch_cu128(self) -> bool:
         try:
             import PyTorchUtils  # noqa: F401
         except ModuleNotFoundError:
@@ -981,19 +981,19 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             torchLogic = PyTorchUtils.PyTorchUtilsLogic()
             if not torchLogic.torchInstalled():
                 if not slicer.util.confirmOkCancelDisplay(
-                    "SAMURAI requires PyTorch (cu126). Install via PyTorch Utils now?",
-                    "Install PyTorch (cu126)"
+                    "SAMURAI requires PyTorch (cu128). Install via PyTorch Utils now?",
+                    "Install PyTorch (cu128)"
                 ):
                     self._log("User cancelled PyTorch install.")
                     return False
-                self._log("Installing PyTorch via PyTorch Utils (cu126)?")
+                self._log("Installing PyTorch via PyTorch Utils (cu128)?")
                 try:
-                    torch_module = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu126')
+                    torch_module = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu128')
                 except TypeError:
                     slicer.util.messageBox(
-                        "This PyTorchUtils build doesn?t support 'cu126'. Update the extension/Slicer Nightly."
+                        "This PyTorchUtils build doesn?t support 'cu128'. Update the extension/Slicer Nightly."
                     )
-                    self._log("PyTorchUtils lacks cu126 backend.")
+                    self._log("PyTorchUtils lacks cu128 backend.")
                     return False
                 if torch_module:
                     if slicer.util.confirmYesNoDisplay(
@@ -1012,8 +1012,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
                 try:
                     import torch
                     cu = getattr(torch.version, "cuda", None)
-                    if cu and not str(cu).startswith("12.6"):
-                        self._log(f"WARNING: Torch CUDA {cu} detected; requested cu126.")
+                    if cu and not str(cu).startswith("12.8"):
+                        self._log(f"WARNING: Torch CUDA {cu} detected; requested cu128.")
                 except Exception as e:
                     self._log(f"torch probe failed: {e}")
                 return True
@@ -1039,8 +1039,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         self._setBusy(True)
         try:
-            # 1) Torch/cu126 first (may require restart)
-            if not self._ensure_torch_cu126():
+            # 1) Torch/cu128 first (may require restart)
+            if not self._ensure_torch_cu128():
                 self._setBusy(False)
                 return
 
@@ -2024,10 +2024,10 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         try:
             import torch
             cu = getattr(torch.version, "cuda", None)
-            if cu and not str(cu).startswith("12.6"):
+            if cu and not str(cu).startswith("12.8"):
                 slicer.util.messageBox(
-                    f"Detected torch CUDA {cu}. This module targets cu126.\n"
-                    "Click 'Configure SAMURAI' to install cu126 via PyTorchUtils, then restart."
+                    f"Detected torch CUDA {cu}. This module targets cu128.\n"
+                    "Click 'Configure SAMURAI' to install cu128 via PyTorchUtils, then restart."
                 )
                 return
         except Exception as e:

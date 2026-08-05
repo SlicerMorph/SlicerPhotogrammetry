@@ -500,14 +500,14 @@ class PhotoMaskingWidget(ScriptedLoadableModuleWidget):
                 ):
                     raise InstallError("User cancelled.")
 
-                logging.debug('Installing PyTorch via the PyTorch extension (cu126)...')
+                logging.debug('Installing PyTorch via the PyTorch extension (cu128)...')
                 try:
-                    torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu126')
+                    torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu128')
                 except TypeError:
                     slicer.util.messageBox(
-                        "This PyTorchUtils build doesn't support 'cu126'. Update the extension/Slicer Nightly."
+                        "This PyTorchUtils build doesn't support 'cu128'. Update the extension/Slicer Nightly."
                     )
-                    logging.warning("PyTorchUtils lacks cu126 backend.")
+                    logging.warning("PyTorchUtils lacks cu128 backend.")
                     return
                 if torch:
                     restart = slicer.util.confirmYesNoDisplay(
