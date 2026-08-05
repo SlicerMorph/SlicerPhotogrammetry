@@ -46,12 +46,25 @@ We recommend using MorphoCloud On Demand for the best experience:
 - **GPU Acceleration**: NVIDIA A100 GPUs significantly speed up both masking and reconstruction
 - **Typical runtime**: 60-70 minutes for the sample data workflow on MorphoCloud
 
-To run locally, you'll need:
+To run locally on Linux, you'll need:
 1. [Docker](https://docs.docker.com/engine/install/)
 2. [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (for GPU support)
 3. Admin access to your computer
 
 > **Note:** Due to Docker installation complexities, the Photogrammetry extension is currently only available in the Slicer Extension Catalogue for Linux. Again, we suggest running the Photogrammetry extension in [MorphoCloud On Demand](https://instances.morpho.cloud) using g3.xl flavor for best performance. 
+
+### Running on Windows
+
+Windows needs no Docker. Instead you install OpenDroneMap's native Windows builds of ODM
+and NodeODM once, by hand, and point Slicer at them; an NVIDIA driver alone is enough for
+GPU acceleration, with no Container Toolkit. Because the extension is not in the Windows
+Extension Catalogue, it is loaded from a local copy of the source.
+
+See **[Running Photogrammetry on Windows](docs/RunningPhotogrammetryOnWindows.md)** for
+the step-by-step setup.
+
+> **Note:** Windows support lives on the `windows-only` branch and has not yet been
+> verified on a Windows machine. Reports welcome.
 
 ## Sample Data
 

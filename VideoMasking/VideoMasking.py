@@ -77,9 +77,21 @@ class VideoMasking(ScriptedLoadableModule):
         )
 
 
+# The one checkpoint this module actually uses. Taken from the URLs in the SAMURAI
+# repo's sam2/checkpoints/download_ckpts.sh, so that the download works on Windows too,
+# where there is no shell to run that script with. The script fetches all four SAM 2.1
+# sizes; only the large one is ever selected here, so only that one is fetched.
+SAM21_CHECKPOINT_BASE_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824"
+SAM21_LARGE_CHECKPOINT_NAME = "sam2.1_hiera_large.pt"
+SAM21_LARGE_CHECKPOINT_URL = f"{SAM21_CHECKPOINT_BASE_URL}/{SAM21_LARGE_CHECKPOINT_NAME}"
+
+
 class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
     DEFAULT_REPO_URL = "https://github.com/SlicerMorph/Samurai.git"
+    # Same repo as a zip, for machines without git (the norm on Windows).
+    DEFAULT_REPO_ZIP_URL = "https://github.com/SlicerMorph/Samurai/archive/refs/heads/main.zip"
+    DEFAULT_REPO_ZIP_ROOT = "Samurai-main"
 
     SETTINGS_KEY = "VideoMasking"
     SETTINGS_INSTALLED = f"{SETTINGS_KEY}/installed"
@@ -572,6 +584,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             throttle_output: If True, only log output every second (useful for noisy commands)
         """
         if isinstance(args, str):
+            # POSIX-mode splitting strips the backslashes out of Windows paths, so pass
+            # a list whenever an argument might be one. Every caller here does.
             args = shlex.split(args)
         p = subprocess.Popen(
             args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -609,18 +623,90 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
 
     def _clone_or_update_samurai(self, repo_url: str, dest_dir: Path):
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        # Windows machines rarely have git, and requiring it just to fetch a source
+        # tree turns a one-click setup into an install detour. GitHub serves the same
+        # tree as a zip; the repo has no submodules, so nothing is lost by taking it.
+        # git is still preferred when present, because then updates are incremental.
+        if not shutil.which("git"):
+            self._log("git not found. Downloading the repository as a zip instead.")
+            self._download_samurai_zip(dest_dir)
+            return
+
         if (dest_dir / ".git").exists():
-            self._log("Repo exists. Fetching latest?")
+            self._log("Repo exists. Fetching latest...")
             self._run_cmd_blocking(["git", "-C", str(dest_dir), "fetch", "--all"])
             self._run_cmd_blocking(["git", "-C", str(dest_dir), "pull", "--ff-only"])
+        elif dest_dir.exists() and any(dest_dir.iterdir()):
+            # A tree fetched earlier as a zip: no .git, so git clone would refuse. It is
+            # already the code we want, so leave it be.
+            self._log(f"Repo folder already present (not a git checkout): {dest_dir}")
         else:
-            self._log(f"Cloning {repo_url} ? {dest_dir}")
+            self._log(f"Cloning {repo_url} -> {dest_dir}")
             self._run_cmd_blocking(["git", "clone", "--depth", "1", repo_url, str(dest_dir)])
+
         if (dest_dir / ".gitmodules").exists():
-            self._log("Initializing submodules?")
+            self._log("Initializing submodules...")
             self._run_cmd_blocking(["git", "-C", str(dest_dir), "submodule", "update", "--init", "--recursive"])
 
-    def _pip(self, spec: str, desc: str = None):
+    def _download_samurai_zip(self, dest_dir: Path):
+        """
+        Fetch the SAMURAI tree as a zip, for machines without git.
+
+        GitHub's archive nests everything under <repo>-<branch>/, so the contents are
+        lifted up into dest_dir to match the layout a clone would have produced -- every
+        other path in this module is written against that layout.
+        """
+        if dest_dir.exists() and any(dest_dir.iterdir()):
+            self._log(f"Repo folder already present: {dest_dir}")
+            return
+
+        zipPath = dest_dir.parent / "samurai-main.zip"
+        extractRoot = dest_dir.parent / "_samurai_zip"
+
+        self._log(f"Downloading {self.DEFAULT_REPO_ZIP_URL}")
+        slicer.app.processEvents()
+        slicer.util.downloadFile(url=self.DEFAULT_REPO_ZIP_URL, targetFilePath=str(zipPath))
+
+        if extractRoot.exists():
+            shutil.rmtree(str(extractRoot))
+        extractRoot.mkdir(parents=True, exist_ok=True)
+
+        self._log("Extracting...")
+        slicer.util.extractArchive(str(zipPath), str(extractRoot))
+
+        nested = extractRoot / self.DEFAULT_REPO_ZIP_ROOT
+        if not nested.is_dir():
+            # Tolerate a renamed default branch rather than hard-coding 'main' forever.
+            candidates = [p for p in extractRoot.iterdir() if p.is_dir()]
+            if len(candidates) != 1:
+                raise RuntimeError(
+                    f"Unexpected archive layout in {extractRoot}: {[p.name for p in candidates]}")
+            nested = candidates[0]
+
+        if dest_dir.exists():
+            shutil.rmtree(str(dest_dir))
+        shutil.move(str(nested), str(dest_dir))
+
+        shutil.rmtree(str(extractRoot), ignore_errors=True)
+        try:
+            zipPath.unlink()
+        except Exception:
+            pass
+
+        self._log(f"Repository ready at {dest_dir}")
+
+    def _pip(self, spec, desc: str = None, optional: bool = False):
+        """
+        Install one requirement.
+
+        `spec` may be a list, which is what to pass when an argument can contain a path:
+        slicer.util.pip_install quotes each list item itself, whereas a single string is
+        split on whitespace and breaks under 'C:\\Users\\First Last\\...'.
+
+        `optional` downgrades a failure to a warning, for packages nothing on the
+        inference path actually imports.
+        """
         if desc:
             self._log(desc)
         ok, out = True, ""
@@ -636,8 +722,35 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             for line in str(out).splitlines():
                 self._log(line)
         if not ok:
+            if optional:
+                self._log(f"WARNING: optional package could not be installed: {spec}")
+                self._log("Continuing; this one is not used by the tracking pipeline.")
+                return False
             raise RuntimeError(f"pip install failed: {spec}")
         return True
+
+    def _pip_sam2_editable(self, path: Path, desc: str):
+        """
+        Editable-install SAM2 from `path` without building its CUDA extension.
+
+        SAM2's setup.py compiles one by default. It is wrapped in BUILD_ALLOW_ERRORS so
+        a failure is survivable, but on a machine with no CUDA toolchain -- which is
+        most Windows machines -- that is minutes of alarming compiler output on the way
+        to exactly the same result. The extension only affects optional mask
+        post-processing, so ask for it not to be built.
+
+        The path goes through as a list item: pip_install quotes those itself, and a
+        Windows profile path can contain spaces.
+        """
+        prior = os.environ.get("SAM2_BUILD_CUDA")
+        os.environ["SAM2_BUILD_CUDA"] = "0"
+        try:
+            return self._pip(["-e", str(path)], desc=desc)
+        finally:
+            if prior is None:
+                os.environ.pop("SAM2_BUILD_CUDA", None)
+            else:
+                os.environ["SAM2_BUILD_CUDA"] = prior
 
     def _install_python_deps(self, repo_dir: Path):
         """
@@ -652,7 +765,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         # 1) Primary editable install from '<repo>/sam2' when present
         sam2_dir = repo_dir / "sam2"
         if sam2_dir.is_dir():
-            self._pip(f'-e "{sam2_dir}"', desc="Installing SAM2 (editable) from sam2/ ?")
+            self._pip_sam2_editable(sam2_dir, "Installing SAM2 (editable) from sam2/ ...")
         else:
             self._log("WARNING: 'sam2' directory not found under repo; will try repo root afterwards.")
 
@@ -665,11 +778,15 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             "pandas",
             "scipy",
             "opencv-python",
-            "jpeg4py",
             "lmdb",
         ]
         for pkg in base:
-            self._pip(pkg, desc=f"pip install {pkg} ?")
+            self._pip(pkg, desc=f"pip install {pkg} ...")
+
+        # jpeg4py is a ctypes wrapper that needs a libjpeg-turbo shared library present;
+        # there is no working Windows build, and nothing on the tracking path imports it
+        # (it belongs to SAMURAI's training dataloaders). Do not fail setup over it.
+        self._pip("jpeg4py", desc="pip install jpeg4py ...", optional=True)
 
         # 3) Video I/O backends (decord preferred) + verify
         self._ensure_video_backends()
@@ -683,7 +800,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             self._log(f"sam2 import still failing after sam2/ editable install: {e_first}")
 
         # 5) Fallback: editable install from repo root (some forks package from top-level)
-        self._pip(f'-e "{repo_dir}"', desc="Fallback: Installing repo (editable) from repo root ?")
+        self._pip_sam2_editable(repo_dir, "Fallback: Installing repo (editable) from repo root ...")
 
         # 6) Re-ensure importability after fallback
         self._ensure_sam2_installed_and_in_path(repo_dir)
@@ -761,20 +878,18 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         """Check and download SAM 2.1 checkpoints if needed."""
         # Checkpoints are inside sam2 subdirectory
         ckpt_dir = repo_dir / "sam2" / "checkpoints"
-        script_sh = ckpt_dir / "download_ckpts.sh"
-        
+
         self._log(f"Checking for checkpoints in: {ckpt_dir}")
-        
-        if not ckpt_dir.exists():
-            self._log(f"Checkpoints directory does not exist: {ckpt_dir}")
+
+        # The repo ships this folder, but create it rather than bail: an incomplete
+        # extraction should not turn into "place checkpoints manually" with no download.
+        try:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self._log(f"Cannot create checkpoints directory {ckpt_dir}: {e}")
             self._log("Place checkpoints manually if required by your model.")
             return
-            
-        if not script_sh.exists():
-            self._log(f"Download script not found: {script_sh}")
-            self._log("Place checkpoints manually if required by your model.")
-            return
-        
+
         # Check what checkpoint files already exist
         existing_files = list(ckpt_dir.iterdir())
         pt_files = [f for f in existing_files if f.suffix.lower() in ('.pt', '.pth')]
@@ -803,56 +918,52 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         
         # No checkpoints exist - offer to download
         self._log("No checkpoint files found. Prompting user to download...")
-        
-        if platform.system() in ("Linux", "Darwin"):
-            reply = slicer.util.confirmYesNoDisplay(
-                "SAM 2.1 checkpoints are not downloaded yet.\n\n"
-                "Would you like to download them now? (This will download sam2.1_hiera_large.pt)\n\n"
-                "Note: This may take several minutes depending on your connection.",
-                "Download SAM 2.1 Checkpoints"
-            )
-            
-            if not reply:
-                self._log("User declined checkpoint download.")
-                self._log(f"Manual download: cd {ckpt_dir} && bash {script_sh.name}")
-                return
-            
-            self._log("User confirmed checkpoint download. Starting download...")
-            self._log(f"Running: bash {script_sh} in directory {ckpt_dir}")
-            
-            try:
-                self._run_cmd_blocking(["bash", str(script_sh)], cwd=str(ckpt_dir), throttle_output=True)
-                self._log("Checkpoint download script completed.")
-                
-                # Verify files were actually downloaded
-                pt_files_after = [f for f in ckpt_dir.iterdir() if f.suffix.lower() in ('.pt', '.pth')]
-                if not pt_files_after:
-                    self._log("WARNING: Script completed but no .pt files found. Check logs above for errors.")
-                    return
-                
-                # Set the checkpoint to sam2.1_hiera_large.pt
-                s = qt.QSettings()
-                large_ckpt = ckpt_dir / "sam2.1_hiera_large.pt"
-                if large_ckpt.exists():
-                    self.ckptEdit.setText(str(large_ckpt))
-                    s.setValue(self.SETTINGS_CKPT_PATH, str(large_ckpt))
-                    self._log(f"Checkpoint set to: {large_ckpt.name}")
-                else:
-                    # Fall back to any .pt file found
-                    self.ckptEdit.setText(str(pt_files_after[0]))
-                    s.setValue(self.SETTINGS_CKPT_PATH, str(pt_files_after[0]))
-                    self._log(f"Checkpoint set to: {pt_files_after[0].name}")
-                    
-                self._log(f"Successfully downloaded {len(pt_files_after)} checkpoint file(s)")
-                
-            except Exception as e:
-                self._log(f"ERROR running checkpoint download script: {e}")
-                self._log(f"Manual download: cd {ckpt_dir} && bash {script_sh.name}")
-                import traceback
-                self._log(traceback.format_exc())
-        else:
-            self._log("Windows detected. Automatic download not supported.")
-            self._log(f"Manual: Run in WSL or follow repo docs. Folder: {ckpt_dir}")
+
+        reply = slicer.util.confirmYesNoDisplay(
+            "SAM 2.1 checkpoints are not downloaded yet.\n\n"
+            f"Would you like to download them now? (This will download {SAM21_LARGE_CHECKPOINT_NAME})\n\n"
+            "Note: This may take several minutes depending on your connection.",
+            "Download SAM 2.1 Checkpoints"
+        )
+
+        if not reply:
+            self._log("User declined checkpoint download.")
+            self._log(f"Manual download: put {SAM21_LARGE_CHECKPOINT_NAME} in {ckpt_dir}")
+            self._log(f"  from {SAM21_LARGE_CHECKPOINT_URL}")
+            return
+
+        # This used to shell out to the repo's download_ckpts.sh, which meant no
+        # checkpoints on Windows at all -- there is no bash, and the code said so and
+        # gave up. Fetching the file directly works the same everywhere and drops the
+        # dependency rather than adding a branch.
+        target = ckpt_dir / SAM21_LARGE_CHECKPOINT_NAME
+        self._log(f"Downloading {SAM21_LARGE_CHECKPOINT_NAME} (about 900 MB)...")
+        self._log(f"  from {SAM21_LARGE_CHECKPOINT_URL}")
+        slicer.app.processEvents()
+
+        try:
+            slicer.util.downloadFile(
+                url=SAM21_LARGE_CHECKPOINT_URL, targetFilePath=str(target))
+        except Exception as e:
+            self._log(f"ERROR downloading checkpoint: {e}")
+            self._log(f"Manual download: put {SAM21_LARGE_CHECKPOINT_NAME} in {ckpt_dir}")
+            self._log(f"  from {SAM21_LARGE_CHECKPOINT_URL}")
+            import traceback
+            self._log(traceback.format_exc())
+            return
+
+        # downloadFile can leave a truncated file behind on a dropped connection, and a
+        # half-written checkpoint fails much later with a confusing torch error.
+        if not target.exists() or target.stat().st_size < 100 * 1024 * 1024:
+            self._log(f"WARNING: {target} is missing or too small to be a checkpoint.")
+            self._log("Delete it and run Configure again.")
+            return
+
+        s = qt.QSettings()
+        self.ckptEdit.setText(str(target))
+        s.setValue(self.SETTINGS_CKPT_PATH, str(target))
+        self._log(f"Checkpoint set to: {target.name}")
+        self._log("Download complete.")
 
     def _ensure_torch_cu126(self) -> bool:
         try:
@@ -1360,20 +1471,52 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         )
         return (True, msg)
 
+    def _ffmpeg_exe(self) -> str:
+        """
+        Locate an ffmpeg binary.
+
+        Linux and macOS boxes usually have one on PATH; Windows almost never does, and
+        telling people to install ffmpeg and edit PATH is the step most likely to defeat
+        them. imageio-ffmpeg ships a binary as an ordinary Python package, so it lands
+        in Slicer's environment like every other dependency this module installs.
+        A system ffmpeg still wins when one is present.
+        """
+        onPath = shutil.which("ffmpeg")
+        if onPath:
+            return onPath
+
+        try:
+            import imageio_ffmpeg
+        except ImportError:
+            self._log("ffmpeg not found on PATH. Installing imageio-ffmpeg...")
+            self._pip("imageio-ffmpeg", desc="pip install imageio-ffmpeg")
+            import importlib
+            importlib.invalidate_caches()
+            import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        self._log(f"Using bundled ffmpeg: {exe}")
+        return exe
+
     def _mov_to_mp4_blocking(self, mov_path: str, mp4_path: str):
         """Convert MOV to MP4 using ffmpeg stream copy (lossless, no re-encoding)."""
-        # Use ffmpeg with stream copy - preserves original quality
-        ffmpeg_cmd = f'ffmpeg -y -i "{mov_path}" -c copy -movflags +faststart "{mp4_path}"'
-        
-        self._log("Converting MOV→MP4 (stream copy, no re-encoding)...")
-        
+        # Build the argument list directly. It used to be one shell-style string run
+        # through shlex.split(), which is POSIX-mode by default and silently eats the
+        # backslashes in a Windows path -- C:\Users\me\clip.mov arrived as C:Usersmeclip.mov.
+        ffmpeg_cmd = [
+            self._ffmpeg_exe(), "-y", "-i", str(mov_path),
+            "-c", "copy", "-movflags", "+faststart", str(mp4_path),
+        ]
+
+        self._log("Converting MOV->MP4 (stream copy, no re-encoding)...")
+
         try:
             # Use clean environment to avoid library conflicts
             env = os.environ.copy()
             env.pop('LD_LIBRARY_PATH', None)
-            
+
             result = subprocess.run(
-                shlex.split(ffmpeg_cmd),
+                ffmpeg_cmd,
                 capture_output=True,
                 text=True,
                 check=True,
@@ -1412,26 +1555,29 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         # Choose output format
         if use_png:
             output_pattern = str(Path(frames_dir) / "frame_%07d.png")
-            quality_args = ""
+            quality_args = []
             format_desc = "PNG (lossless)"
         else:
             output_pattern = str(Path(frames_dir) / "frame_%07d.jpg")
-            quality_args = "-q:v 1"  # Highest quality JPEG (q:v 1 = best, equivalent to quality ~95-100)
+            quality_args = ["-q:v", "1"]  # Highest quality JPEG (q:v 1 = best, equivalent to quality ~95-100)
             format_desc = "JPEG (q:v 1, maximum quality)"
-        
-        # Build ffmpeg command
-        ffmpeg_cmd = f'ffmpeg -y -i "{video_path}" {quality_args} "{output_pattern}"'.strip()
-        
+
+        # An argument list, not a shell string: see the note in _mov_to_mp4_blocking
+        # about shlex.split() destroying Windows paths.
+        ffmpeg_cmd = [self._ffmpeg_exe(), "-y", "-i", str(video_path)]
+        ffmpeg_cmd += quality_args
+        ffmpeg_cmd.append(output_pattern)
+
         self._log(f"Extracting frames as {format_desc}...")
-        
+
         try:
             # Use clean environment
             env = os.environ.copy()
             env.pop('LD_LIBRARY_PATH', None)
-            
+
             # Run extraction with progress monitoring
             process = subprocess.Popen(
-                shlex.split(ffmpeg_cmd),
+                ffmpeg_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

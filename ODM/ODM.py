@@ -15,6 +15,20 @@ import json
 from slicer.ScriptedLoadableModule import *
 
 
+def isWindows():
+    """
+    Windows has no Docker option here, so it drives a natively installed NodeODM
+    instead. See docs/RunningPhotogrammetryOnWindows.md for the setup this expects.
+    """
+    return sys.platform == "win32"
+
+
+# Where the Windows tutorial tells people to put things. Used only to pre-fill the
+# path fields when they happen to be right; nothing is created or installed here.
+WINDOWS_DEFAULT_ODM_PATH = r"C:\ODM"
+WINDOWS_DEFAULT_NODEODM_EXE = r"C:\NodeODM\nodeodm.exe"
+
+
 class ODM(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
@@ -35,7 +49,8 @@ class ODMWidget(ScriptedLoadableModuleWidget):
     """
     UI and logic for the ODM module.
     Manages:
-     - NodeODM installation and launching (Docker-based)
+     - NodeODM launching (a Docker container on Linux, a natively installed
+       nodeodm.exe on Windows)
      - Input folder selection (for masked images from PhotoMasking or VideoMasking)
      - WebODM task configuration and execution
      - Task monitoring and result downloading
@@ -64,6 +79,9 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         # NodeODM management
         self.launchWebODMButton = None
         self.stopWebODMButton = None
+        # Windows only: where the user installed NodeODM and ODM by hand.
+        self.nodeODMExeSelector = None
+        self.odmInstallSelector = None
         
         # Model import
         self.importModelButton = None
@@ -144,7 +162,10 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         manageWODMCollapsible.text = "Manage NodeODM (Install/Launch)"
         self.layout.addWidget(manageWODMCollapsible)
         manageWODMFormLayout = qt.QFormLayout(manageWODMCollapsible)
-        
+
+        if isWindows():
+            self.setupWindowsNodePathRows(manageWODMFormLayout)
+
         buttonRow = qt.QHBoxLayout()
         self.launchWebODMButton = qt.QPushButton("Launch NodeODM")
         self.stopWebODMButton = qt.QPushButton("Stop Node")
@@ -406,15 +427,74 @@ class ODMWidget(ScriptedLoadableModuleWidget):
         # Initialize WebODM manager
         self.webODMManager = ODMManager(widget=self)
 
+    def setupWindowsNodePathRows(self, formLayout):
+        """
+        Ask Windows users where they installed NodeODM and ODM.
+
+        On Linux the node is a container this module pulls and runs; on Windows it is
+        two programs the user installed by hand, and the module only needs to be told
+        where they are. Both paths are remembered, so this is a one-time step.
+        """
+        self.nodeODMExeSelector = ctk.ctkPathLineEdit()
+        self.nodeODMExeSelector.filters = ctk.ctkPathLineEdit().Files
+        self.nodeODMExeSelector.setToolTip(
+            "Path to nodeodm.exe from the NodeODM Windows bundle.\n"
+            "See docs/RunningPhotogrammetryOnWindows.md."
+        )
+        formLayout.addRow("NodeODM executable:", self.nodeODMExeSelector)
+
+        self.odmInstallSelector = ctk.ctkPathLineEdit()
+        self.odmInstallSelector.filters = ctk.ctkPathLineEdit().Dirs
+        self.odmInstallSelector.setToolTip(
+            "Folder where ODM was installed by ODM_Setup (the one containing run.bat).\n"
+            "Default is C:\\ODM."
+        )
+        formLayout.addRow("ODM install folder:", self.odmInstallSelector)
+
+        # Prefer what the user chose last time; otherwise offer the tutorial's defaults,
+        # but only when they actually exist -- a pre-filled path that points at nothing
+        # is worse than an empty box.
+        savedExe = slicer.app.settings().value("ODM/nodeODMExePath", "")
+        if not os.path.isfile(savedExe) and os.path.isfile(WINDOWS_DEFAULT_NODEODM_EXE):
+            savedExe = WINDOWS_DEFAULT_NODEODM_EXE
+        if os.path.isfile(savedExe):
+            self.nodeODMExeSelector.setCurrentPath(savedExe)
+
+        savedOdm = slicer.app.settings().value("ODM/odmInstallPath", "")
+        if not os.path.isdir(savedOdm) and os.path.isdir(WINDOWS_DEFAULT_ODM_PATH):
+            savedOdm = WINDOWS_DEFAULT_ODM_PATH
+        if os.path.isdir(savedOdm):
+            self.odmInstallSelector.setCurrentPath(savedOdm)
+
+        self.nodeODMExeSelector.connect('currentPathChanged(QString)', self.onNodeODMExeChanged)
+        self.odmInstallSelector.connect('currentPathChanged(QString)', self.onODMInstallPathChanged)
+
+    def onNodeODMExeChanged(self, newPath):
+        if os.path.isfile(newPath):
+            slicer.app.settings().setValue("ODM/nodeODMExePath", newPath)
+
+    def onODMInstallPathChanged(self, newPath):
+        if os.path.isdir(newPath):
+            slicer.app.settings().setValue("ODM/odmInstallPath", newPath)
+
     def ensure_webodm_folder_permissions(self):
         """Ensure the WebODM folder exists with proper permissions."""
         import stat
         import logging
-        
+
         try:
             if not os.path.exists(self.webODMLocalFolder):
                 os.makedirs(self.webODMLocalFolder, exist_ok=True)
-            
+
+            # The 0777 below is for the Docker bind mount only: NodeODM runs as a
+            # different user inside the container and could not otherwise write there.
+            # Native Windows NodeODM runs as the user and keeps its data next to the
+            # executable, so there is nothing to relax -- and os.chmod on Windows only
+            # toggles the read-only bit anyway.
+            if isWindows():
+                logging.info(f"WebODM folder created: {self.webODMLocalFolder}")
+                return
+
             # Set permissions: 0777 (rwxrwxrwx) so Docker container can write
             # This is necessary because NodeODM runs as a different user inside the container
             os.chmod(self.webODMLocalFolder, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
@@ -685,7 +765,8 @@ class ODMManager:
     Manager class dedicated to WebODM/NodeODM functionality:
      - Checking Docker / WebODM status
      - Installing / Re-installing WebODM
-     - Launching a container with GPU support on port 3002
+     - Launching a container with GPU support on port 3002 (Linux)
+     - Launching a natively installed nodeodm.exe (Windows)
      - Stopping a running node
      - Creating / monitoring a pyodm Task
      - Downloading results on completion
@@ -699,8 +780,132 @@ class ODMManager:
         self.webodmOutDir = None
         self.webodmTimer = None
         self.lastWebODMOutputLineIndex = 0
+        # Windows only: the nodeodm.exe this module started, so Stop Node can end it.
+        self.nodeProcess = None
 
     def onLaunchWebODMClicked(self):
+        """Start a node: a container on Linux, the installed nodeodm.exe on Windows."""
+        if isWindows():
+            self.launchNativeNode()
+        else:
+            self.launchDockerNode()
+
+    def launchNativeNode(self):
+        """
+        Start the NodeODM the user installed, on the port the task section will use.
+
+        Nothing is downloaded or installed here -- if either program is missing we say
+        so and point at the tutorial, because getting them onto the machine is a manual
+        step by design.
+        """
+        exePath = (self.widget.nodeODMExeSelector.currentPath or "").strip()
+        odmPath = (self.widget.odmInstallSelector.currentPath or "").strip()
+
+        if not os.path.isfile(exePath):
+            slicer.util.errorDisplay(
+                "Set 'NodeODM executable' to your nodeodm.exe first.\n\n"
+                "See docs/RunningPhotogrammetryOnWindows.md for where to get it."
+            )
+            return
+        # run.bat is what NodeODM actually invokes, so its absence is the real failure
+        # -- and it is a far clearer message than the one NodeODM gives later.
+        if not os.path.isfile(os.path.join(odmPath, "run.bat")):
+            slicer.util.errorDisplay(
+                f"'ODM install folder' does not look like an ODM installation:\n{odmPath}\n\n"
+                "It should contain run.bat (the default install location is C:\\ODM).\n"
+                "See docs/RunningPhotogrammetryOnWindows.md."
+            )
+            return
+
+        if self.nodeProcess is not None and self.nodeProcess.state() != qt.QProcess.NotRunning:
+            slicer.util.infoDisplay(
+                "NodeODM is already running from this module.\n\n"
+                "Use 'Stop Node' first if you want to restart it."
+            )
+            return
+
+        port = self.widget.nodePortSpinBox.value
+
+        self.nodeProcess = qt.QProcess()
+        # NodeODM resolves 'helpers\\odm_python.bat' and 'apps\\7z\\7z.exe' relative to
+        # the working directory, not to the executable, so it has to be launched from
+        # its own folder or it cannot even read ODM's option list.
+        self.nodeProcess.setWorkingDirectory(os.path.dirname(exePath))
+        self.nodeProcess.setProcessChannelMode(qt.QProcess.MergedChannels)
+        self.nodeProcess.connect('readyReadStandardOutput()', self.onNodeProcessOutput)
+
+        self.widget.webodmLogTextEdit.clear()
+        self.widget.webodmLogTextEdit.append(f"Starting NodeODM on port {port}")
+        self.widget.webodmLogTextEdit.append(f"  nodeodm.exe: {exePath}")
+        self.widget.webodmLogTextEdit.append(f"  --odm_path:  {odmPath}")
+
+        self.nodeProcess.start(exePath, ["--odm_path", odmPath, "--port", str(port)])
+        if not self.nodeProcess.waitForStarted(10000):
+            slicer.util.errorDisplay(f"Could not start:\n{exePath}")
+            self.nodeProcess = None
+            return
+
+        self.widget.nodeIPLineEdit.setText("127.0.0.1")
+        slicer.app.settings().setValue("ODM/WebODMIP", "127.0.0.1")
+        slicer.app.settings().setValue("ODM/WebODMPort", str(port))
+
+        # Started is not the same as serving, and a bad --odm_path makes nodeodm.exe
+        # exit seconds later. Wait until it actually answers before saying it is up,
+        # so the failure surfaces here rather than when a task is submitted.
+        if self.waitForNodeReady(port):
+            self.widget.webodmLogTextEdit.append("NodeODM is up.")
+            slicer.util.infoDisplay(
+                f"NodeODM is running on port {port}.", autoCloseMsec=3000)
+        else:
+            slicer.util.warningDisplay(
+                f"NodeODM was started but did not respond on port {port}.\n\n"
+                "Check the Console Log above for what it printed."
+            )
+
+    def onNodeProcessOutput(self):
+        """Show what nodeodm.exe prints; it is the only clue when a launch fails."""
+        if self.nodeProcess is None:
+            return
+
+        raw = self.nodeProcess.readAllStandardOutput()
+        # PythonQt hands back a QByteArray, and which of these two works depends on the
+        # binding. Logging is not worth an exception, so try both and give up quietly.
+        try:
+            text = raw.data().decode("utf-8", errors="replace")
+        except AttributeError:
+            text = str(raw)
+        except Exception:
+            return
+
+        for line in text.splitlines():
+            if line.strip():
+                self.widget.webodmLogTextEdit.append(line.rstrip())
+        slicer.app.processEvents()
+
+    def waitForNodeReady(self, port, timeoutSec=30):
+        """Poll the node until it answers, or give up. True if it came up."""
+        try:
+            from pyodm import Node
+        except ImportError:
+            return False
+
+        import time
+        node = Node("127.0.0.1", port)
+        deadline = time.time() + timeoutSec
+        while time.time() < deadline:
+            # A node that has already exited will never answer, so stop waiting on it.
+            if self.nodeProcess is not None and self.nodeProcess.state() == qt.QProcess.NotRunning:
+                return False
+            try:
+                node.info()
+                return True
+            except Exception:
+                pass
+            slicer.app.processEvents()
+            time.sleep(1)
+        return False
+
+    def launchDockerNode(self):
         """
         Launch NodeODM container with GPU support on port 3002
         """
@@ -786,7 +991,7 @@ class ODMManager:
 
     def onStopNodeClicked(self):
         """
-        Stop the running NodeODM container on port 3002
+        Stop the running node: the container on Linux, nodeodm.exe on Windows.
         """
         jobInProgress = (self.webodmTask is not None)
 
@@ -799,6 +1004,39 @@ class ODMManager:
                 slicer.util.infoDisplay("Stop Node canceled by user.")
                 return
 
+        if isWindows():
+            self.stopNativeNode()
+            return
+
+        self.stopDockerNode()
+
+    def stopNativeNode(self):
+        """
+        End the nodeodm.exe this module started.
+
+        Only that one: a node the user launched in their own terminal is theirs to
+        stop, and killing it from here would be a surprise.
+        """
+        if self.nodeProcess is None or self.nodeProcess.state() == qt.QProcess.NotRunning:
+            self.nodeProcess = None
+            slicer.util.infoDisplay(
+                "No NodeODM was started from this module.\n\n"
+                "If you started nodeodm.exe yourself, close that window to stop it."
+            )
+            return
+
+        self.nodeProcess.terminate()
+        if not self.nodeProcess.waitForFinished(10000):
+            # It ignored the polite request; NodeODM holds the port, so a stuck process
+            # blocks the next launch.
+            self.nodeProcess.kill()
+            self.nodeProcess.waitForFinished(5000)
+
+        self.nodeProcess = None
+        self.widget.webodmLogTextEdit.append("NodeODM stopped.")
+        slicer.util.infoDisplay("NodeODM stopped.", autoCloseMsec=2000)
+
+    def stopDockerNode(self):
         try:
             result = subprocess.run(
                 ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],

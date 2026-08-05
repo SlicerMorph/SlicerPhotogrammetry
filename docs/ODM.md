@@ -34,11 +34,16 @@ ODM (OpenDroneMap) is a 3D Slicer module for photogrammetry reconstruction. It t
 
 ## Prerequisites
 
-ODM requires Docker to be installed on your system:
+On Linux, ODM requires Docker to be installed on your system:
 - [Install Docker](https://docs.docker.com/engine/install/)
 - [Install NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (for GPU acceleration)
 
 > **Note:** If you're using [MorphoCloud On Demand](https://instances.morpho.cloud), all prerequisites are already installed.
+
+**On Windows there is no Docker.** You install OpenDroneMap's native ODM and NodeODM once
+by hand and point the module at them, and an NVIDIA driver alone gives you GPU
+acceleration. See [Running Photogrammetry on Windows](RunningPhotogrammetryOnWindows.md).
+Everything in this guide after launching the node applies unchanged.
 
 ---
 
