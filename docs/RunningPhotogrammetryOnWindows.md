@@ -7,12 +7,18 @@ install two OpenDroneMap programs natively, once, and point Slicer at them.
 Everything here is a manual, one-time setup. The extension never downloads or installs
 these programs for you.
 
-> **Status: this branch is not yet verified on Windows.** The `windows-only` branch
-> exists so this can be tested. If a step below is wrong, please open an issue.
+> **Status: verified through launching NodeODM.** Confirmed on Windows 11 with Slicer
+> 5.12.3, ODM 3.6.1 and NodeODM v2.2.3: Steps 1-5 all work, both path fields prefill
+> themselves, and **Launch NodeODM** reports the node up and serving. Getting there
+> required [Step 4b](#step-4b---patch-one-file-in-nodeodm-required), which was found by
+> testing rather than by reading the sources. A full reconstruction and everything from
+> "Running a reconstruction" onward is still untested. If a step below is wrong, please
+> open an issue.
 
 ## Table of Contents
 
 1. [What you need](#what-you-need)
+   - [Check the VC++ runtime first](#check-the-vc-runtime-first)
 2. [Step 1 - Install 3D Slicer and the PyTorch extension](#step-1---install-3d-slicer-and-the-pytorch-extension)
 3. [Step 2 - Get the Photogrammetry extension](#step-2---get-the-photogrammetry-extension)
 4. [Step 3 - Install ODM](#step-3---install-odm)
@@ -28,6 +34,8 @@ these programs for you.
 ## What you need
 
 - 64-bit Windows 10 or 11.
+- The **Microsoft Visual C++ 2015-2022 Redistributable (x64), version 14.40 or newer.**
+  This is a hard requirement, and the one most likely to bite you - see below.
 - About **12 GB** of free disk space for the software, plus room for your projects.
   Reconstructions are large; budget several GB per dataset.
 - **16 GB RAM minimum**, more is better. Photogrammetry is memory-hungry.
@@ -36,8 +44,27 @@ these programs for you.
   everything still works on the CPU, just slower.
 - A network connection for the downloads below.
 
-You do **not** need Docker, WSL, git, or admin rights on the Slicer side. The ODM
-installer may ask for admin once (see [Troubleshooting](#troubleshooting)).
+You do **not** need Docker, WSL, git, or admin rights on the Slicer side.
+
+### Check the VC++ runtime first
+
+ODM 3.6.1 is built with the Visual Studio 2022 toolset. Against an older runtime its
+GDAL binaries do not fail gracefully - they crash on load, and every reconstruction dies
+instantly with a bare `Processing failed (3221225477)` and an empty log. A machine that
+has only ever had older Visual C++ redistributables installed (14.22, from 2019, is a
+common one to be stuck on) will look fine until the very first task fails.
+
+`ODM_Setup` installs the right runtime itself, but that step needs elevation - so if you
+decline the UAC prompt, you get exactly this. Checking takes a second:
+
+```powershell
+(Get-Item C:\Windows\System32\MSVCP140.dll).VersionInfo.FileVersion
+```
+
+If that reports below **14.40**, or the file is missing, install the
+[VC++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) and reboot
+before you start. Doing it now costs a minute; discovering it later costs a full masking
+run and a failed task.
 
 ---
 
@@ -85,7 +112,7 @@ installer on GitHub.
 
 1. Go to the [ODM releases page](https://github.com/OpenDroneMap/ODM/releases).
 2. Download the `ODM_Setup_<version>.exe` asset from the latest release that has one.
-   As of August 2026 that is **ODM_Setup_3.6.1.exe** (about 245 MB).
+   As of August 2026 that is **ODM_Setup_3.6.1.exe** (234 MB, published 28 July 2026).
 
    Note that not every ODM release ships a Windows installer - if the newest release has
    only source archives, take the most recent one that has an `.exe`.
@@ -97,8 +124,26 @@ installer on GitHub.
    > `C:\ODM` also keeps project paths short, which matters because Windows limits paths
    > to 260 characters by default.
 
+   > **Do not decline the UAC prompt.** The installer places ODM in `C:\ODM` as the
+   > current user, but it also installs the Microsoft Visual C++ Redistributable, and
+   > that part needs elevation. ODM 3.6.1 is built with the Visual Studio 2022 toolset
+   > and its GDAL binaries crash on load against an older runtime - which produces a
+   > task that fails instantly with a bare `Processing failed (3221225477)` and no log
+   > output at all. See
+   > [Troubleshooting](#troubleshooting) if you hit that.
+
 4. When it finishes you should have `C:\ODM\run.bat`. Slicer looks for exactly that
    file to confirm the installation is real.
+
+5. Verify ODM can actually run before going further - this catches the runtime problem
+   above immediately:
+
+   ```powershell
+   cmd /c "pushd C:\ODM && call win32env.bat && gdalinfo --version"
+   ```
+
+   It should print something like `GDAL 3.11.1, released 2025/07/01`. If it prints
+   nothing at all, your VC++ runtime is too old.
 
 You do not need to open the ODM Console. Slicer never calls ODM directly - NodeODM does.
 
@@ -110,8 +155,11 @@ NodeODM is a small server that puts a web API in front of ODM. Slicer talks to i
 it runs your jobs. The Windows bundle is self-contained - no Node.js install needed.
 
 1. Go to the [NodeODM releases page](https://github.com/OpenDroneMap/NodeODM/releases).
-2. Download **`nodeodm-windows-x64.zip`** (about 18 MB) from the latest release that has
-   it - currently **v2.2.3**.
+2. Download **`nodeodm-windows-x64.zip`** (17 MB) from the latest release that has it.
+   That is **v2.2.3**, from May 2024 - no newer NodeODM release ships a Windows bundle,
+   so this is expected to look out of date. Because it is that old, it needs a one-file
+   patch to work with current ODM; see [Step 4b](#step-4b---patch-one-file-in-nodeodm-required)
+   below.
 3. Extract it to **`C:\NodeODM`**, again avoiding any path with spaces.
 
    You should end up with `C:\NodeODM\nodeodm.exe` alongside `helpers\` and `apps\`
@@ -126,11 +174,54 @@ will likely show "Windows protected your PC" the first time it runs. Click **Mor
 Run anyway**. You can verify what you downloaded by checking it came from the
 `github.com/OpenDroneMap/NodeODM` releases page over HTTPS.
 
+### Step 4b - Patch one file in NodeODM (required)
+
+**Without this, NodeODM starts and immediately exits.** This is not optional, and it is
+not something you did wrong.
+
+The v2.2.3 bundle ships `C:\NodeODM\helpers\odmOptionsToJson.py`, the script NodeODM uses
+to ask ODM what options it supports. That script begins with `import imp`. Python removed
+the `imp` module in version 3.12, and ODM 3.6.1 bundles Python 3.12.9 - so the script dies
+on its first line, NodeODM cannot read ODM's option list, and it quits. What you see in
+Slicer is:
+
+```
+error: Cannot read list of options from ODM (from temporary file). Is ODM installed in C:\ODM?
+```
+
+followed by *"NodeODM was started but did not respond on port 3002."* The paths are fine;
+the two programs are simply a Python version apart.
+
+NodeODM fixed this upstream after the v2.2.3 bundle was built, but no newer Windows
+bundle has been published. So replace that single file with the current version.
+
+In PowerShell:
+
+```powershell
+Copy-Item C:\NodeODM\helpers\odmOptionsToJson.py C:\NodeODM\helpers\odmOptionsToJson.py.orig
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/OpenDroneMap/NodeODM/master/helpers/odmOptionsToJson.py -OutFile C:\NodeODM\helpers\odmOptionsToJson.py
+```
+
+Or download
+[odmOptionsToJson.py](https://raw.githubusercontent.com/OpenDroneMap/NodeODM/master/helpers/odmOptionsToJson.py)
+in a browser and save it over `C:\NodeODM\helpers\odmOptionsToJson.py`, keeping a copy of
+the original first.
+
+The replacement does the same job using `importlib` instead of `imp`. Nothing else in the
+bundle uses `imp`, so this one file is the whole fix.
+
 ---
 
 ## Step 5 - Point Slicer at both
 
 1. Open Slicer and go to the **Reconstruct 3D Models with ODM** module.
+
+   The first time you open it, Slicer puts up an **Install pyodm** dialog - the module
+   needs that Python package to talk to NodeODM. Click **OK** and give it a few seconds;
+   a confirmation box follows, which you also dismiss. This happens once. Until you
+   answer the dialog the rest of Slicer is unresponsive, which is normal - it is a modal
+   prompt, not a freeze.
+
 2. Open the **Manage NodeODM (Install/Launch)** section. On Windows it shows two extra
    fields:
    - **NodeODM executable** - set to `C:\NodeODM\nodeodm.exe`
@@ -222,8 +313,43 @@ Almost always a wrong **ODM install folder**. Read the Console Log; NodeODM says
 could not find. Check that `C:\ODM\run.bat` exists.
 
 **"NodeODM was started but did not respond on port 3002"**
-Something else may hold that port. Change **Node Port** in the Launch WebODM Task
-section, then Stop Node and Launch again. Otherwise read the Console Log.
+First check the Console Log for `Cannot read list of options from ODM`. If it is there,
+you skipped [Step 4b](#step-4b---patch-one-file-in-nodeodm-required) - NodeODM started,
+failed to read ODM's options, and exited. This is the most common cause by far.
+
+Otherwise something else may hold that port. Change **Node Port** in the Launch WebODM
+Task section, then Stop Node and Launch again. A firewall block looks different: the
+process keeps running and only the connection fails, so check whether `nodeodm.exe` is
+still in Task Manager before blaming the firewall.
+
+**A task fails instantly with "Processing failed (3221225477)"**
+Your Microsoft Visual C++ Redistributable is too old. 3221225477 is `0xC0000005`, a
+Windows access violation - ODM crashes on startup, before printing a single line, so the
+Console Log and the node's task output are both empty.
+
+ODM 3.6.1 is built with the Visual Studio 2022 toolset and needs the **14.4x** runtime.
+If yours is older (14.22, from 2019, is a common one to be stuck on) every GDAL binary
+inside ODM faults in `MSVCP140.dll` the moment it loads. Nothing about your images,
+masks, or NodeODM is involved - `gdalinfo --version` crashes just as reliably.
+
+Check what you have:
+
+```powershell
+(Get-Item C:\Windows\System32\MSVCP140.dll).VersionInfo.FileVersion
+```
+
+If that is below 14.40, install the current
+[VC++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) and reboot. This
+is the step ODM_Setup tries to perform itself, so if you declined the UAC prompt during
+installation, this is the result.
+
+To confirm the fix before resubmitting a task:
+
+```powershell
+cmd /c "pushd C:\ODM && call win32env.bat && gdalinfo --version"
+```
+
+That must print a GDAL version. If it prints nothing, the runtime is still wrong.
 
 **The installer asks for administrator rights**
 ODM_Setup installs to `C:\ODM` as the current user, but it also installs the Microsoft
