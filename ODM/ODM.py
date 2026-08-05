@@ -112,7 +112,11 @@ class ODMWidget(ScriptedLoadableModuleWidget):
             "feature-quality": ["ultra", "medium", "high"],
             "pc-quality": ["high", "medium", "ultra"],
             "optimize-disk-space": [True, False],
-            "rerun": ["openmvs", "dataset", "split", "merge", "opensfm"],
+            # First entry is what every task gets unless the user changes it, so this
+            # one has to be "no rerun": --rerun <stage> runs that stage alone, and on a
+            # freshly uploaded dataset any real stage fails for want of the output the
+            # stages before it never produced.
+            "rerun": ["(none)", "dataset", "split", "merge", "opensfm", "openmvs"],
             "no-gpu": [False, True],
         }
         self.factorComboBoxes = {}
@@ -825,12 +829,16 @@ class ODMManager:
             return
 
         port = self.widget.nodePortSpinBox.value
+        # NodeODM builds '%ODM_PATH%\\win32env.bat' by concatenation, so a trailing
+        # separator from the path picker turns into a path ODM cannot resolve.
+        odmPath = os.path.normpath(odmPath)
 
         self.nodeProcess = qt.QProcess()
         # NodeODM resolves 'helpers\\odm_python.bat' and 'apps\\7z\\7z.exe' relative to
         # the working directory, not to the executable, so it has to be launched from
         # its own folder or it cannot even read ODM's option list.
         self.nodeProcess.setWorkingDirectory(os.path.dirname(exePath))
+        self.nodeProcess.setEnvironment(self.buildCleanEnvironment(odmPath))
         self.nodeProcess.setProcessChannelMode(qt.QProcess.MergedChannels)
         self.nodeProcess.connect('readyReadStandardOutput()', self.onNodeProcessOutput)
 
@@ -861,6 +869,60 @@ class ODMManager:
                 f"NodeODM was started but did not respond on port {port}.\n\n"
                 "Check the Console Log above for what it printed."
             )
+
+    def buildCleanEnvironment(self, odmPath):
+        """
+        Hand NodeODM a bare Windows environment rather than Slicer's.
+
+        QProcess passes our environment straight down the chain nodeodm.exe ->
+        run.bat -> win32env.bat -> ODM's bundled python.exe, and Slicer's is not a
+        neutral one: it exports its own PYTHONHOME/PYTHONPATH and puts Slicer's bin
+        and lib directories on PATH. win32env.bat clears the python variables and
+        prepends ODM's own directories, but Slicer's PATH entries survive underneath,
+        where they are in front of the system directories ODM's own binaries expect
+        to find. Rebuilding the environment removes a whole class of "works from a
+        command prompt, fails from Slicer" differences rather than waiting to find
+        out which entry collides first.
+
+        Only what Windows itself needs is passed through; ODM sets up everything else.
+        """
+        systemRoot = os.environ.get("SystemRoot", r"C:\Windows")
+
+        passThrough = [
+            "ALLUSERSPROFILE", "APPDATA", "COMSPEC", "CommonProgramFiles",
+            "CommonProgramFiles(x86)", "CommonProgramW6432", "HOMEDRIVE", "HOMEPATH",
+            "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "OS", "PATHEXT",
+            "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL",
+            "PROCESSOR_REVISION", "PUBLIC", "ProgramData", "ProgramFiles",
+            "ProgramFiles(x86)", "ProgramW6432", "SystemDrive", "SystemRoot",
+            "TEMP", "TMP", "USERDOMAIN", "USERNAME", "USERPROFILE", "windir",
+        ]
+
+        env = {}
+        for name in passThrough:
+            value = os.environ.get(name)
+            if value:
+                env[name] = value
+
+        # Rebuilt from nothing on purpose: inheriting Slicer's PATH is the problem
+        # this method exists to solve, so filtering it entry by entry would only
+        # invite the next Slicer release to add something new that breaks ODM again.
+        env["PATH"] = os.pathsep.join([
+            os.path.join(systemRoot, "system32"),
+            systemRoot,
+            os.path.join(systemRoot, "System32", "Wbem"),
+            os.path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0"),
+        ])
+
+        # helpers\\odm_python.bat calls '%ODM_PATH%\\win32env.bat'. That is how NodeODM
+        # reads ODM's list of supported options at startup, and when the read fails it
+        # falls back to a stale built-in list and silently drops task options that are
+        # not on it -- so this has to be set even though NodeODM also sets it itself.
+        env["ODM_PATH"] = odmPath
+
+        # QProcess.setEnvironment takes "NAME=VALUE" strings. It is the older of the
+        # two environment APIs, but it is the one PythonQt exposes dependably.
+        return ["%s=%s" % (name, value) for name, value in env.items()]
 
     def onNodeProcessOutput(self):
         """Show what nodeodm.exe prints; it is the only clue when a launch fails."""
@@ -1173,6 +1235,10 @@ class ODMManager:
                 params["optimize-disk-space"] = (chosen_str.lower() == "true")
             elif factorName == "no-gpu":
                 params["no-gpu"] = (chosen_str.lower() == "true")
+            elif factorName == "rerun" and chosen_str == "(none)":
+                # Send nothing rather than a stage name: ODM has no "rerun nothing"
+                # value, so the only way to ask for a normal full run is to omit it.
+                continue
             else:
                 try:
                     val_int = int(chosen_str)
