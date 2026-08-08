@@ -639,6 +639,30 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             raise RuntimeError(f"pip install failed: {spec}")
         return True
 
+    def _install_declared_requirements(self):
+        """
+        Install the PyPI packages declared in Resources/requirements_VideoMasking.txt.
+
+        Keeping the list in a requirements file means it can be read - and
+        pre-installed - without running the module. Only the packages that are
+        actually missing are installed. SAM2 and the video backend are not
+        declarable there and are installed separately (see that file).
+        """
+        requirementsPath = self.resourcePath("requirements_VideoMasking.txt")
+        try:
+            from slicer.packaging import load_requirements, pip_ensure
+        except ImportError as e:
+            raise RuntimeError(
+                "VideoMasking requires 3D Slicer 5.12 or later. On earlier releases, "
+                f"install the packages listed in {requirementsPath} manually, or use "
+                "the stable-5.10 branch of this extension."
+            ) from e
+
+        self._log(f"Installing declared Python packages from {requirementsPath}")
+        # The user already confirmed the (blocking) setup, so do not prompt again.
+        pip_ensure(load_requirements(requirementsPath), requester="VideoMasking",
+                   prompt_install=False)
+
     def _install_python_deps(self, repo_dir: Path):
         """
         Install SAM-2 and its runtime deps in a way that is resilient on Slicer's embedded Python.
@@ -657,19 +681,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             self._log("WARNING: 'sam2' directory not found under repo; will try repo root afterwards.")
 
         # 2) Core runtime deps used in the pipeline
-        base = [
-            "hydra-core",
-            "omegaconf",
-            "iopath",
-            "loguru",
-            "pandas",
-            "scipy",
-            "opencv-python",
-            "jpeg4py",
-            "lmdb",
-        ]
-        for pkg in base:
-            self._pip(pkg, desc=f"pip install {pkg} ?")
+        self._install_declared_requirements()
 
         # 3) Video I/O backends (decord preferred) + verify
         self._ensure_video_backends()
@@ -3060,22 +3072,22 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         - Pillow (PIL) ? image IO and EXIF writing bridge
         - piexif ? EXIF injection
         - pymediainfo ? extract EXIF-like info from video container
+
+        All three are declared in Resources/requirements_VideoMasking.txt with the
+        rest of the module's packages, so a missing one is installed from there.
         """
         try:
             import PIL  # noqa
-        except Exception:
-            self._pip("Pillow", "Installing Pillow (for EXIF writing)")
-            import PIL  # noqa
-        try:
             import piexif  # noqa
-        except Exception:
-            self._pip("piexif", "Installing piexif (for EXIF injection)")
-            import piexif  # noqa
-        try:
             from pymediainfo import MediaInfo  # noqa
+            return
         except Exception:
-            self._pip("pymediainfo", "Installing pymediainfo (for video metadata)")
-            from pymediainfo import MediaInfo  # noqa
+            pass
+
+        self._install_declared_requirements()
+        import PIL  # noqa
+        import piexif  # noqa
+        from pymediainfo import MediaInfo  # noqa
 
     def _extract_video_metadata(self, video_path: str):
         """

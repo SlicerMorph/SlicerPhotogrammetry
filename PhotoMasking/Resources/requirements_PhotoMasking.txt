@@ -1,0 +1,22 @@
+# Python packages required by the PhotoMasking module.
+#
+# The module installs these on demand (the first time it is opened), but the
+# list is kept here so it can be read - and pre-installed - without running the
+# module, e.g. for offline or restricted-network deployments:
+#
+#   PythonSlicer -m pip install -r requirements_PhotoMasking.txt
+#
+# torch is deliberately not listed: it is installed through the PyTorch
+# extension (EXTENSION_DEPENDS in the top-level CMakeLists.txt), which picks a
+# build matching the machine's CUDA runtime.
+Pillow
+opencv-python
+opencv-contrib-python
+matplotlib
+
+# segment-anything is not released on PyPI. It is installed straight from the
+# upstream repository archive - which is what PhotoMasking has always done -
+# expressed here as a PEP 508 direct reference so pip can read it from this
+# file too. Note that the archive tracks the upstream 'main' branch, so it is
+# not a reproducible pin.
+segment-anything @ https://github.com/facebookresearch/segment-anything/archive/refs/heads/main.zip

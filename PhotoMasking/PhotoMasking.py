@@ -520,54 +520,41 @@ class PhotoMaskingWidget(ScriptedLoadableModuleWidget):
         except Exception:
             pass
 
+        # Everything else this module needs - including segment-anything, which
+        # is installed from a GitHub archive - is declared in
+        # Resources/requirements_PhotoMasking.txt, so the set can be read (and
+        # pre-installed) without running the module. Only the packages that are
+        # actually missing are installed here.
+        requirementsPath = self.resourcePath("requirements_PhotoMasking.txt")
         try:
-            from PIL import Image
-            from PIL.ExifTags import TAGS
+            from slicer.packaging import load_requirements, pip_ensure
         except ImportError:
-            slicer.util.pip_install("Pillow")
-            from PIL import Image
-            from PIL.ExifTags import TAGS
-
-        try:
-            import cv2
-            if not hasattr(cv2, 'xfeatures2d'):
-                raise ImportError("opencv-contrib-python is not properly installed")
-        except ImportError:
-            slicer.util.pip_install("opencv-python")
-            slicer.util.pip_install("opencv-contrib-python")
-            import cv2
-
-        try:
-            import segment_anything
-        except ImportError:
-            import os
-            from slicer.util import downloadFile, extractArchive, pip_install
-
-            # 1) Decide where to put the downloaded ZIP locally:
-            modulePath = os.path.dirname(slicer.modules.photomasking.path)
-            resourcesFolder = os.path.join(modulePath, "Resources")
-            if not os.path.isdir(resourcesFolder):
-                os.makedirs(resourcesFolder)
-
-            # 2) Direct download link
-            url = "https://github.com/facebookresearch/segment-anything/archive/refs/heads/main.zip"
-
-            try:
-                pip_install(url)
-            except Exception as e:
-                slicer.util.errorDisplay(f"Failed to pip-install segment-anything from {localExtractDir}:\n{str(e)}")
-                raise
-
-            # 3) Finally, import again
-            import segment_anything
+            slicer.util.messageBox(
+                "PhotoMasking requires 3D Slicer 5.12 or later.\n\n"
+                "On earlier releases, install the packages listed in\n"
+                f"{requirementsPath}\n"
+                "manually, or use the stable-5.10 branch of this extension."
+            )
+            return
 
         try:
-            import matplotlib
-        except ImportError:
-            slicer.util.pip_install("matplotlib")
-            import matplotlib
+            pip_ensure(load_requirements(requirementsPath), requester="PhotoMasking")
+        except Exception as e:
+            logging.warning(f"PhotoMasking: Python package installation did not complete: {e}")
+            slicer.util.messageBox(
+                "PhotoMasking cannot be used until the Python packages listed in\n"
+                f"{requirementsPath}\n"
+                "are installed."
+            )
+            return
 
-        from segment_anything import sam_model_registry, SamPredictor
+        # Report a missing SAM early, but without breaking the module UI: the
+        # install is skipped when Slicer runs in testing mode, and the user may
+        # have declined it.
+        try:
+            from segment_anything import sam_model_registry, SamPredictor  # noqa: F401
+        except ImportError as e:
+            logging.warning(f"PhotoMasking: segment-anything is not available: {e}")
 
     def createCustomLayout(self):
         """

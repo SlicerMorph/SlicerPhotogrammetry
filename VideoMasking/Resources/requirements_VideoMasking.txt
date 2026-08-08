@@ -1,0 +1,43 @@
+# Python packages required by the VideoMasking module.
+#
+# The module installs these on demand (when SAM2 is configured, and again
+# before saving masked frames), but the list is kept here so it can be read -
+# and pre-installed - without running the module, e.g. for offline or
+# restricted-network deployments:
+#
+#   PythonSlicer -m pip install -r requirements_VideoMasking.txt
+#
+# torch is deliberately not listed: it is installed through the PyTorch
+# extension (EXTENSION_DEPENDS in the top-level CMakeLists.txt), which picks a
+# build matching the machine's CUDA runtime.
+
+# SAM2 runtime dependencies
+hydra-core
+omegaconf
+iopath
+loguru
+pandas
+scipy
+opencv-python
+jpeg4py
+lmdb
+
+# Saving masked frames with EXIF metadata
+Pillow
+piexif
+pymediainfo
+
+# Two dependencies cannot be declared here, and are installed by the module
+# itself:
+#
+# - SAM2: cloned at configure time (by default from
+#   https://github.com/SlicerMorph/Samurai.git) and installed editable with
+#   'pip install -e <clone>/sam2', so the spec does not exist until the module
+#   has run.
+#
+# - The video decoding backend: 'decord' is preferred (tried as decord==0.6.0,
+#   then decord==0.6.1, then decord) and 'av' (av==12.2.0, then av) is used
+#   when no decord wheel is available for the platform. A requirements file
+#   cannot express that either/or, and pinning decord here would turn a
+#   working fallback into a hard failure - so pre-install 'decord' if a wheel
+#   exists for your platform, and 'av' otherwise.
