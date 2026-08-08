@@ -639,7 +639,7 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             raise RuntimeError(f"pip install failed: {spec}")
         return True
 
-    def _install_declared_requirements(self):
+    def _install_declared_requirements(self, prompt_install: bool = True):
         """
         Install the PyPI packages declared in Resources/requirements_VideoMasking.txt.
 
@@ -647,6 +647,9 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         pre-installed - without running the module. Only the packages that are
         actually missing are installed. SAM2 and the video backend are not
         declarable there and are installed separately (see that file).
+
+        :param prompt_install: ask before installing. Pass False only where the
+            user has already confirmed an install-heavy operation.
         """
         requirementsPath = self.resourcePath("requirements_VideoMasking.txt")
         try:
@@ -659,9 +662,8 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
             ) from e
 
         self._log(f"Installing declared Python packages from {requirementsPath}")
-        # The user already confirmed the (blocking) setup, so do not prompt again.
         pip_ensure(load_requirements(requirementsPath), requester="VideoMasking",
-                   prompt_install=False)
+                   prompt_install=prompt_install)
 
     def _install_python_deps(self, repo_dir: Path):
         """
@@ -680,8 +682,9 @@ class VideoMaskingWidget(ScriptedLoadableModuleWidget):
         else:
             self._log("WARNING: 'sam2' directory not found under repo; will try repo root afterwards.")
 
-        # 2) Core runtime deps used in the pipeline
-        self._install_declared_requirements()
+        # 2) Core runtime deps used in the pipeline. The user already confirmed
+        #    the (blocking) setup, so do not prompt again here.
+        self._install_declared_requirements(prompt_install=False)
 
         # 3) Video I/O backends (decord preferred) + verify
         self._ensure_video_backends()
