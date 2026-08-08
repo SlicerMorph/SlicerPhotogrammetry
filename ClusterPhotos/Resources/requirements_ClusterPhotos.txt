@@ -1,0 +1,13 @@
+# Python dependencies for the ClusterPhotos module.
+# Installed on demand at runtime via slicer.util.pip_install() calls in
+# ClusterPhotos.py; declared here so the set is discoverable without running
+# the module (e.g. for pre-provisioning / offline installs).
+#
+# Note: torch is intentionally not listed here - it is provided by the
+# "SlicerMorph PyTorch" extension dependency (see CMakeLists.txt).
+Pillow
+transformers>4.29.2
+scikit-learn
+umap-learn
+opencv-python
+opencv-contrib-python

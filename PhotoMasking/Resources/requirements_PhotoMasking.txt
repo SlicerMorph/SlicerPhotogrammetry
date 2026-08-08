@@ -1,0 +1,15 @@
+# Python dependencies for the PhotoMasking module.
+# Installed on demand at runtime via slicer.util.pip_install() calls in
+# PhotoMasking.py; declared here so the set is discoverable without running
+# the module.
+#
+# Note: torch is intentionally not listed here - it is provided by the
+# "SlicerMorph PyTorch" extension dependency (see CMakeLists.txt).
+Pillow
+opencv-python
+opencv-contrib-python
+matplotlib
+
+# segment-anything has no PyPI release; installed from a GitHub archive
+# using pip's direct-reference syntax (PEP 508).
+segment-anything @ https://github.com/facebookresearch/segment-anything/archive/refs/heads/main.zip

@@ -1,0 +1,4 @@
+# Python dependencies for the ODM module.
+# Installed on demand at runtime via slicer.util.pip_install() in ODM.py;
+# declared here so the set is discoverable without running the module.
+pyodm

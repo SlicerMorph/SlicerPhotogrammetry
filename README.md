@@ -53,6 +53,28 @@ To run locally, you'll need:
 
 > **Note:** Due to Docker installation complexities, the Photogrammetry extension is currently only available in the Slicer Extension Catalogue for Linux. Again, we suggest running the Photogrammetry extension in [MorphoCloud On Demand](https://instances.morpho.cloud) using g3.xl flavor for best performance. 
 
+## Python Dependencies
+
+Each module installs its own Python dependencies on demand (via `slicer.util.pip_install`) the first time it needs them, so no manual setup is required for interactive use. For pre-provisioning, offline installs, or restricted-network deployments, the full dependency set for each module is declared statically in:
+
+```
+ClusterPhotos/Resources/requirements_ClusterPhotos.txt
+PhotoMasking/Resources/requirements_PhotoMasking.txt
+VideoMasking/Resources/requirements_VideoMasking.txt
+ODM/Resources/requirements_ODM.txt
+```
+
+These can be pre-installed into Slicer's Python environment ahead of time, e.g.:
+
+```bash
+PythonSlicer -m pip install -r PhotoMasking/Resources/requirements_PhotoMasking.txt
+```
+
+Notes:
+- `torch` is intentionally not listed in any requirements file - it is provided by the [SlicerMorph PyTorch](https://github.com/SlicerMorph/SlicerPyTorch) extension, which is a declared extension dependency (see `CMakeLists.txt`).
+- `segment-anything` (used by **PhotoMasking**) has no PyPI release; it is declared via a direct GitHub archive reference in `requirements_PhotoMasking.txt`.
+- SAM2 (used by **VideoMasking**) has no PyPI release and is installed editable from a repository ([SlicerMorph/Samurai](https://github.com/SlicerMorph/Samurai)) that VideoMasking clones at runtime, so its exact spec cannot be pinned ahead of time in a requirements file.
+
 ## Sample Data
 
 ### Full Dataset

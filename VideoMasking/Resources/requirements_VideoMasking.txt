@@ -1,0 +1,29 @@
+# Python dependencies for the VideoMasking module.
+# Installed on demand at runtime via VideoMasking.py's self._pip() helper
+# (a thin wrapper around slicer.util.pip_install()); declared here so the
+# set is discoverable without running the module.
+#
+# Note: torch is intentionally not listed here - it is provided by the
+# "SlicerMorph PyTorch" extension dependency (see CMakeLists.txt).
+Pillow
+piexif
+pymediainfo
+hydra-core
+omegaconf
+iopath
+loguru
+pandas
+scipy
+opencv-python
+jpeg4py
+lmdb
+
+# Preferred video I/O backend for SAM2. If a wheel is unavailable for the
+# target platform, VideoMasking.py falls back to installing 'av' instead
+# (see _ensure_video_backends()).
+decord
+
+# SAM2 has no PyPI release. VideoMasking.py clones a repository at runtime
+# (default: https://github.com/SlicerMorph/Samurai.git, see DEFAULT_REPO_URL)
+# and installs it editable ('pip install -e <clone dir>/sam2'), so its spec
+# cannot be pinned ahead of time in this file.
