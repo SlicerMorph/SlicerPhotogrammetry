@@ -53,6 +53,33 @@ To run locally, you'll need:
 
 > **Note:** Due to Docker installation complexities, the Photogrammetry extension is currently only available in the Slicer Extension Catalogue for Linux. Again, we suggest running the Photogrammetry extension in [MorphoCloud On Demand](https://instances.morpho.cloud) using g3.xl flavor for best performance. 
 
+### Python dependencies
+
+Each module installs the Python packages it needs on demand, so no manual setup is required for normal use. The packages are declared in a requirements file per module, so the set can also be read - and pre-installed - without running the module (useful for pre-provisioned images, offline installs, and restricted networks):
+
+| Module | Requirements file |
+| --- | --- |
+| ClusterPhotos | [`ClusterPhotos/Resources/requirements_ClusterPhotos.txt`](ClusterPhotos/Resources/requirements_ClusterPhotos.txt) |
+| PhotoMasking | [`PhotoMasking/Resources/requirements_PhotoMasking.txt`](PhotoMasking/Resources/requirements_PhotoMasking.txt) |
+| VideoMasking | [`VideoMasking/Resources/requirements_VideoMasking.txt`](VideoMasking/Resources/requirements_VideoMasking.txt) |
+| ODM | [`ODM/Resources/requirements_ODM.txt`](ODM/Resources/requirements_ODM.txt) |
+
+To pre-install them into Slicer's Python environment:
+
+```bash
+PythonSlicer -m pip install -r PhotoMasking/Resources/requirements_PhotoMasking.txt
+```
+
+At runtime the modules load the same files through [`slicer.packaging`](https://github.com/Slicer/Slicer/pull/9010) (Slicer 5.12+), which installs only what is missing.
+
+Three dependencies are not declared in those files:
+
+- **PyTorch** is installed through the [PyTorch](https://github.com/fepegar/SlicerPyTorch) extension (a declared extension dependency), which selects a build matching the machine's CUDA runtime.
+- **SAM2** (VideoMasking) is cloned at configure time from [SlicerMorph/Samurai](https://github.com/SlicerMorph/Samurai) and installed as an editable install, so the spec does not exist until the module has run.
+- **The video decoding backend** (VideoMasking) is either `decord` (preferred) or `av`, depending on which has a wheel for the platform - an either/or a requirements file cannot express.
+
+`segment-anything` (PhotoMasking) has no PyPI release, but *is* declared: the requirements file points pip at the upstream GitHub archive.
+
 ## Sample Data
 
 ### Full Dataset

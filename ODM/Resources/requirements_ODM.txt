@@ -1,0 +1,8 @@
+# Python packages required by the ODM module.
+#
+# The module installs these on demand (the first time it is opened), but the
+# list is kept here so it can be read - and pre-installed - without running the
+# module, e.g. for offline or restricted-network deployments:
+#
+#   PythonSlicer -m pip install -r requirements_ODM.txt
+pyodm

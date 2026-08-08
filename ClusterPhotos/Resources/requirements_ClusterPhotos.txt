@@ -1,0 +1,17 @@
+# Python packages required by the ClusterPhotos module.
+#
+# The module installs these on demand (the first time it is opened), but the
+# list is kept here so it can be read - and pre-installed - without running the
+# module, e.g. for offline or restricted-network deployments:
+#
+#   PythonSlicer -m pip install -r requirements_ClusterPhotos.txt
+#
+# torch is deliberately not listed: it is installed through the PyTorch
+# extension (EXTENSION_DEPENDS in the top-level CMakeLists.txt), which picks a
+# build matching the machine's CUDA runtime.
+Pillow
+transformers>4.29.2
+scikit-learn
+umap-learn
+opencv-python
+opencv-contrib-python

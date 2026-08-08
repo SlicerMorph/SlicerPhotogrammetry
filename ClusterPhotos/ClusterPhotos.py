@@ -280,45 +280,31 @@ class ClusterPhotosWidget(ScriptedLoadableModuleWidget):
         except Exception as e:
             logging.warning(f"Could not complete PyTorch installation steps: {e}")
 
-        # Pillow
+        # Everything else this module needs is declared in
+        # Resources/requirements_ClusterPhotos.txt, so the set can be read (and
+        # pre-installed) without running the module. Only the packages that are
+        # actually missing are installed here.
+        requirementsPath = self.resourcePath("requirements_ClusterPhotos.txt")
         try:
-            from PIL import Image
-            from PIL.ExifTags import TAGS
+            from slicer.packaging import load_requirements, pip_ensure
         except ImportError:
-            slicer.util.pip_install("pillow")
-            from PIL import Image
-            from PIL.ExifTags import TAGS
+            slicer.util.messageBox(
+                "ClusterPhotos requires 3D Slicer 5.12 or later.\n\n"
+                "On earlier releases, install the packages listed in\n"
+                f"{requirementsPath}\n"
+                "manually, or use the stable-5.10 branch of this extension."
+            )
+            return
 
-        # Transformers
         try:
-            import transformers
-        except ImportError:
-            slicer.util.pip_install("transformers>4.29.2")
-            import transformers
-
-        # scikit-learn
-        try:
-            import sklearn
-        except ImportError:
-            slicer.util.pip_install("scikit-learn")
-            import sklearn
-
-        # umap-learn
-        try:
-            import umap
-        except ImportError:
-            slicer.util.pip_install("umap-learn")
-            import umap
-
-        # OpenCV (optional)
-        try:
-            import cv2
-            if not hasattr(cv2, 'xfeatures2d'):
-                raise ImportError("opencv-contrib-python is not properly installed")
-        except ImportError:
-            slicer.util.pip_install("opencv-python")
-            slicer.util.pip_install("opencv-contrib-python")
-            import cv2
+            pip_ensure(load_requirements(requirementsPath), requester="ClusterPhotos")
+        except Exception as e:
+            logging.warning(f"ClusterPhotos: Python package installation did not complete: {e}")
+            slicer.util.messageBox(
+                "ClusterPhotos cannot be used until the Python packages listed in\n"
+                f"{requirementsPath}\n"
+                "are installed."
+            )
 
     # -------------------------------------------------------------------------
     #   Event handlers

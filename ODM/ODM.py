@@ -423,32 +423,33 @@ class ODMWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\n{str(e)}")
     
     def _ensurePyODMInstalled(self):
-        """Check if pyodm is installed, and install it if missing."""
+        """Install this module's Python packages (pyodm) if they are missing.
+
+        The list is declared in Resources/requirements_ODM.txt so that it can be
+        read - and pre-installed - without running the module.
+        """
+        requirementsPath = self.resourcePath("requirements_ODM.txt")
         try:
-            import pyodm  # noqa: F401
-            # Already installed
-            return
+            from slicer.packaging import load_requirements, pip_ensure
         except ImportError:
-            pass
-        
-        # Ask user to install
-        if not slicer.util.confirmOkCancelDisplay(
-            "The ODM module requires the 'pyodm' Python package.\n\n"
-            "Install it now?",
-            "Install pyodm"
-        ):
             slicer.util.warningDisplay(
-                "pyodm is required for this module to function.\n"
-                "You can install it manually via:\n"
-                "pip install pyodm"
+                "The ODM module requires 3D Slicer 5.12 or later.\n\n"
+                "On earlier releases, install the packages listed in\n"
+                f"{requirementsPath}\n"
+                "manually, or use the stable-5.10 branch of this extension."
             )
             return
-        
+
         try:
-            slicer.util.pip_install("pyodm")
-            slicer.util.infoDisplay("pyodm installed successfully!")
+            pip_ensure(load_requirements(requirementsPath), requester="ODM")
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to install pyodm:\n{e}\n\nPlease install manually:\npip install pyodm")
+            logging.warning(f"ODM: Python package installation did not complete: {e}")
+            slicer.util.warningDisplay(
+                "The ODM module cannot function until the Python packages listed in\n"
+                f"{requirementsPath}\n"
+                "are installed. You can install them manually with:\n"
+                f"PythonSlicer -m pip install -r {requirementsPath}"
+            )
 
     def onLaunchWebODMClicked(self):
         """Launch NodeODM container with GPU support on port 3002"""
